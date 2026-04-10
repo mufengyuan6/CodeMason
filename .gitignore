@@ -1,0 +1,85 @@
+# ========== 第一层：通用开发杂物 ==========
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI 工具
+.workbuddy/
+.ai-dev/
+CLAUDE.md
+AGENTS.md
+.agent/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+build/
+
+# 日志
+*.log
+logs/
+
+# 密钥
+.env
+*.key
+*.pem
+credentials.json
+service-account.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========== 第二层：设计文档（绝不上传） ==========
+docs/
+
+# ========== 第三层：参考文档（绝不上传） ==========
+参考/
+references/
+参考文档/
+*.docx
+*.pdf
+*.epub
+
+# ========== 第四层：调试/测试/临时文件 ==========
+_verify*.py
+_verify*.sh
+verify*.py
+*_resp.json
+chat_resp.json
+r1.json
+r2.json
+*_events.db
+test_*.json
+shot.mjs
+nul
+
+# ========== 第五层：项目专项 ==========
+# 会话数据（事件存储）
+.codemason/
+sessions/
+data/
+
+# Playwright 测试产物
+frontend/test-results/
+frontend/test-results.bak/
+frontend/test-results_*/
+frontend/playwright-report/
+frontend/e2e_shots/
+
+# 前端构建
+frontend/dist/
+frontend/node_modules/

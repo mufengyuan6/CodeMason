@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  coding-agent:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # 可选: PostgreSQL用于知识图谱持久化
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: coding_agent
+      POSTGRES_PASSWORD: coding_agent
+      POSTGRES_DB: coding_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
