@@ -9,7 +9,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:5847',
+    baseURL: 'http://127.0.0.1:29864',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',

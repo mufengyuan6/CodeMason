@@ -74,9 +74,49 @@ class EventLog:
 
     # ---------- 写入 ----------
 
+    def next_event_id(self) -> int:
+        """原子分配下一个事件 id（跨进程唯一，P1-6 修复）。
+
+        以 .tail 文件为跨进程共享计数器：flock 写锁 → 读当前 → +1 → 写回。
+        替代进程内 EventIdGenerator（启动时快照 + 内存递增——多进程写同一
+        JSONL 会撞 id，此前靠 append 兜底改写，浪费且返回值与磁盘不一致）。
+        """
+        tail_path = self.path.parent / TAIL_FILE
+        with self._lock:  # 进程内互斥（多线程）
+            try:
+                # 确保文件存在且非空（msvcrt.locking 需至少 1 字节可锁）
+                if not tail_path.exists() or tail_path.stat().st_size == 0:
+                    tail_path.write_text("0")
+                fh = tail_path.open("a+")
+                try:
+                    if not _lock_file(fh):
+                        raise EventLogError("事件 id 分配写锁超时（30s）")
+                    fh.seek(0)
+                    raw = fh.read().strip()
+                    current = int(raw) if raw.isdigit() else 0
+                    new_id = current + 1
+                    fh.seek(0)
+                    fh.truncate()
+                    fh.write(str(new_id))
+                    fh.flush()
+                    _unlock_file(fh)
+                    return new_id
+                finally:
+                    fh.close()
+            except OSError:
+                # 极端文件系统异常：退化读盘兜底（不阻断写入）
+                return self.last_id() + 1
+
     def append(self, event: Event) -> int:
-        """追加一个事件，返回其 id。带 flock 写锁 + 尾指针更新。"""
+        """追加一个事件，返回其 id。带 flock 写锁 + 尾指针更新。
+
+        id 单调性兜底（防御性）：主路径已走 next_event_id() 原子分配，
+        此兜底仅防护外部绕过 EventLog 直接写 JSONL 的异常场景。
+        """
         with self._lock:
+            cur = self.last_id()
+            if event.id <= cur:
+                event = event.model_copy(update={"id": cur + 1})
             fh = self.path.open("ab+")
             try:
                 if not _lock_file(fh):
@@ -94,8 +134,16 @@ class EventLog:
             return event.id
 
     def append_many(self, events: list[Event]) -> list[int]:
-        """批量追加（原子写锁一次），返回 id 列表。"""
+        """批量追加（原子写锁一次），返回 id 列表。带 id 单调性兜底（多进程场景）。"""
         with self._lock:
+            cur = self.last_id()
+            fixed = []
+            for ev in events:
+                if ev.id <= cur:
+                    ev = ev.model_copy(update={"id": cur + 1})
+                cur = ev.id
+                fixed.append(ev)
+            events = fixed
             fh = self.path.open("ab+")
             try:
                 if not _lock_file(fh):
@@ -173,12 +221,45 @@ class EventLog:
             events = self.read_all()
             return events[-1].id if events else 0
 
+    def file_last_id(self) -> int:
+        """本会话 JSONL 实际最后事件 id（不依赖共享 .tail）。
+
+        场景：多会话切换时，.tail 是会话目录级共享计数器（跨进程全局 id 递增），
+        不代表本会话文件尾部。WS 断线补发/会话恢复需要"本会话从哪开始补发"，
+        必须读盘取本文件最后一个事件 id（空文件 = 0）。
+        """
+        events = self.read_all()
+        return events[-1].id if events else 0
+
     # ---------- 内部 ----------
 
     def _update_tail(self, event_id: int) -> None:
-        """更新尾指针（跨进程同步：server 监听此值增量广播）。"""
+        """更新尾指针（跨进程同步：server 监听此值增量广播）。
+
+        v1.13 修复（S19 发现 P0）：旧实现无条件 write_text(event_id)，
+        多进程（内核 + server + 外部工具）共享 JSONL 时，低 id 事件写入会把
+        .tail 回退 → TailWatcher 判定 current <= _last_seen → 静默停止广播。
+        改为 max 语义（单调不减），加跨进程写锁防并发撕裂。
+        """
         tail_path = self.path.parent / TAIL_FILE
-        tail_path.write_text(str(event_id))
+        try:
+            fh = tail_path.open("a+")
+            try:
+                if not _lock_file(fh):
+                    return  # 锁超时：放弃更新（广播由其他进程/下次写入兜底）
+                fh.seek(0)
+                raw = fh.read().strip()
+                current = int(raw) if raw.isdigit() else 0
+                new_val = max(current, event_id)
+                fh.seek(0)
+                fh.truncate()
+                fh.write(str(new_val))
+                fh.flush()
+                _unlock_file(fh)
+            finally:
+                fh.close()
+        except OSError:
+            pass
 
     def _cache_event(self, event: Event) -> None:
         self._cache[event.id] = event

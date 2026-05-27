@@ -65,11 +65,6 @@ Tree-sitter · JSONL · Git Checkpoint
 export default function LandingPage({ onEnterApp }) {
   /* ─── 滚动状态 ─── */
   const [progress, setProgress] = useState(0)
-  const [formVisible, setFormVisible] = useState(false)
-  const [formSubmitted, setFormSubmitted] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState('')
-  const [formData, setFormData] = useState({ name: '', email: '', message: '' })
   const [trailStickers, setTrailStickers] = useState([])
 
   const video1Ref = useRef(null)
@@ -105,21 +100,6 @@ export default function LandingPage({ onEnterApp }) {
     const translateY = 100 - alpha * 450
     return { opacity, transform: `translateY(${translateY}vh)` }
   }, [progress])
-
-  const formStyle = useMemo(() => {
-    if (formVisible) {
-      return {
-        bottom: '50%',
-        transform: 'translate(-50%, 50%) rotate(0deg)',
-        transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)',
-      }
-    }
-    return {
-      bottom: '50%',
-      transform: 'translate(-50%, 150vh) rotate(15deg)',
-      transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)',
-    }
-  }, [formVisible])
 
   /* ─── HLS 初始化（动态 import，失败自动降级，不影响页面） ─── */
   const setupVideo = useCallback((video, url) => {
@@ -168,10 +148,7 @@ export default function LandingPage({ onEnterApp }) {
       targetV2Ref.current =
         p >= 0.99 ? v2.duration : Math.max(0, (p - 0.5) / 0.5) * v2.duration
     }
-    if (newProgress >= 0.95 && !formVisible) {
-      setFormVisible(true)
-    }
-  }, [formVisible])
+  }, [])
 
   /* ─── 鼠标轨迹贴纸 ─── */
   const onMouseMove = useCallback((e) => {
@@ -224,27 +201,6 @@ export default function LandingPage({ onEnterApp }) {
       cancelAnimationFrame(rafIdRef.current)
     }
   }, [onScroll, onMouseMove, scrubLoop, setupVideo])
-
-  /* ─── 表单提交 → 进入驾驶舱 ─── */
-  const submitForm = async (e) => {
-    e.preventDefault()
-    setSubmitting(true)
-    setSubmitError('')
-    try {
-      // 进入驾驶舱（WebSocket 事件流 + 审批中心 + YAGNI 看板）
-      await new Promise((r) => setTimeout(r, 400))
-      onEnterApp()
-    } catch (err) {
-      setSubmitError(err.message || '进入驾驶舱失败')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  const resetForm = () => {
-    setFormSubmitted(false)
-    setFormData({ name: '', email: '', message: '' })
-  }
 
   const scrollToBottom = () => {
     document.documentElement.scrollTo({
@@ -388,64 +344,16 @@ export default function LandingPage({ onEnterApp }) {
         ))}
       </div>
 
-      {/* 9. 反馈表单（接真实 /analyze API） */}
-      <div className="form-box" style={formStyle} data-testid="feedback-form">
-        <button className="form-close" onClick={() => setFormVisible(false)}>
-          [X]
+      {/* 9. 进入驾驶舱（一键直达，无表单障碍） */}
+      <div className="enter-app" data-testid="enter-app">
+        <button
+          className="enter-app-btn"
+          onClick={onEnterApp}
+          data-testid="enter-app-btn"
+        >
+          进入驾驶舱
         </button>
-
-        {!formSubmitted ? (
-          <form className="form-inner" onSubmit={submitForm}>
-            <h2 className="form-title">进入驾驶舱</h2>
-            <input
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              type="text"
-              required
-              placeholder="输入会话名称"
-              className="form-input"
-              data-testid="form-name"
-            />
-            <input
-              value={formData.email}
-              onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-              type="email"
-              required
-              placeholder="你的邮箱（用于会话备注）"
-              className="form-input"
-              data-testid="form-email"
-            />
-            <textarea
-              value={formData.message}
-              onChange={(e) => setFormData({ ...formData, message: e.target.value })}
-              required
-              rows={3}
-              placeholder="描述第一个任务：让 Agent 帮你改代码、修 bug、写功能…"
-              className="form-input form-textarea"
-              data-testid="form-message"
-            />
-            {submitError && <div className="form-error" data-testid="form-error">{submitError}</div>}
-            <button
-              type="submit"
-              className="form-submit"
-              disabled={submitting}
-              data-testid="form-submit"
-            >
-              {submitting ? '连接中...' : '进入驾驶舱'}
-            </button>
-          </form>
-        ) : (
-          <div className="form-success" data-testid="form-success">
-            <div className="success-star">✦</div>
-            <h3 className="success-title">优化请求已提交</h3>
-            <p className="success-desc">
-              驾驶舱连接中：事件流时间线 / 审批中心 / YAGNI 看板已就绪。
-            </p>
-            <button className="success-btn" onClick={resetForm}>
-              [ NEW TRANSMISSION ]
-            </button>
-          </div>
-        )}
+        <p className="enter-app-hint">发任务 · 看每一步 · 关键点审批 —— 一切可回滚可审计</p>
       </div>
     </div>
   )

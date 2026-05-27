@@ -18,7 +18,50 @@ from pathlib import Path
 import uvicorn
 
 from . import main as web_main
-from .main import init_cockpit, mount_frontend
+from .main import attach_v113_modules, attach_v123_modules, init_cockpit, mount_frontend
+
+
+def _mount_v113_modules() -> None:
+    """挂载 v1.13 模块（成本台账 / 上下文指标 / 健康信号）——驾驶舱演示有真实数据。"""
+    from ..context.health import SessionHealth
+    from ..cost import CostLedger
+    from ..evaluation.evaluator import ContextMetrics
+
+    attach_v113_modules(
+        ledger=CostLedger(warn_threshold=8000),
+        metrics=ContextMetrics(),
+        health=SessionHealth(),
+        recall=None,
+    )
+
+
+def _mount_v123_modules() -> None:
+    """挂载 v1.23 模块（贡献报告 / 审批收件箱 / 自动分类器 / Team Kernel / OTel）——G18/G19/G14/G17⑧ 驾驶舱可见。"""
+    from ..loop.inbox import ApprovalInbox
+    from ..observability.otel_exporter import OTelExporter
+    from ..projection.contribution import ContributionReporter
+    from ..security import AutoSafetyClassifier
+    from ..team import PermissionMatrix, TeamKernel, TeamTriggers
+
+    # 分类器接入内核（G18：审批即事件，Tier 分级）
+    classifier = AutoSafetyClassifier()
+    if web_main.LOOP is not None:
+        web_main.LOOP.set_classifier(classifier)
+    # 收件箱 + 贡献报告 + Team Kernel + OTel
+    inbox = ApprovalInbox()
+    matrix = PermissionMatrix()
+    matrix.add_rule("experience/*", "team")
+    matrix.add_rule("secrets/*", "secret", allow_agents=["finance-agent"])
+    otel = OTelExporter()
+    if web_main.EVENT_LOG is not None:
+        otel.attach(web_main.EVENT_LOG)
+    attach_v123_modules(
+        contribution=ContributionReporter(web_main.EVENT_LOG) if web_main.EVENT_LOG is not None else None,
+        inbox=inbox,
+        classifier=classifier,
+        team=TeamKernel(event_log=web_main.EVENT_LOG) if web_main.EVENT_LOG is not None else None,
+        otel=otel,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
 
     token = args.token or secrets.token_hex(8)
     init_cockpit(session_id=args.session, token=token)
+    _mount_v113_modules()
+    _mount_v123_modules()
 
     frontend_dir = args.frontend
     if frontend_dir is None:

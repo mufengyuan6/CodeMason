@@ -1,15 +1,18 @@
-"""记忆层：三层记忆（会话 JSONL / 项目规则 / 跨会话经验）。"""
+"""记忆层：事件投影三视图（会话 JSONL+sidecar / 项目契约+事实表 / 全局经验）+ MemoryBackend 抽象。"""
 
+from .backend import JsonlMemoryBackend, MemoryBackend
 from .global_memory import GlobalMemory
+from .memory_system import MemoryManager, MemoryProjector
 from .project import BugPatternStore, ProjectMemory
 from .session import SessionMemory
 
-__all__ = ["SessionMemory", "ProjectMemory", "GlobalMemory", "BugPatternStore"]
-
-# 兼容旧 API（T6 重写旧 REST 后移除）
-try:
-    from .memory_system import MemoryManager  # noqa: F401
-
-    __all__.append("MemoryManager")
-except ImportError:  # pragma: no cover
-    pass
+__all__ = [
+    "SessionMemory",
+    "ProjectMemory",
+    "GlobalMemory",
+    "BugPatternStore",
+    "MemoryManager",
+    "MemoryProjector",
+    "MemoryBackend",
+    "JsonlMemoryBackend",
+]

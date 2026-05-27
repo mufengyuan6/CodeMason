@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -90,6 +91,10 @@ class OpSubmit(BaseModel):
     confirm_token: Optional[str] = None  # 审批二次确认
 
 
+class SessionSwitchRequest(BaseModel):
+    session_id: str
+
+
 # ========== 启动钩子 ==========
 
 def init_cockpit(session_id: str = "web", token: Optional[str] = None, loop: Optional[AgentLoop] = None) -> None:
@@ -118,6 +123,17 @@ def _authorize(headers) -> Optional[str]:
     return token
 
 
+def require_auth(x_agent_token: Optional[str] = Header(default=None, alias="x-agent-token")) -> str:
+    """FastAPI 依赖：受保护 REST 端点统一鉴权（P1-1 修复：REST 端点不再裸奔）。
+
+    适用范围：/sessions /events /costs /context /health-signals /compact。
+    豁免：/health（监控探活）、/auth/token（自身即鉴权接口）、/ws（独立握手鉴权）。
+    """
+    if not _check_token(x_agent_token):
+        raise HTTPException(status_code=401, detail="无效 token")
+    return x_agent_token or ""
+
+
 # ========== REST 端点 ==========
 
 @app.get("/health")
@@ -133,7 +149,7 @@ async def auth_token(req: TokenRequest):
     raise HTTPException(status_code=401, detail="无效 token")
 
 
-@app.get("/sessions")
+@app.get("/sessions", dependencies=[Depends(require_auth)])
 async def list_sessions():
     """会话列表（对标 pi-web：按工作目录组织）。"""
     sessions = []
@@ -143,13 +159,179 @@ async def list_sessions():
     return {"sessions": sessions}
 
 
-@app.get("/events")
+@app.post("/sessions/switch", dependencies=[Depends(require_auth)])
+async def switch_session(req: SessionSwitchRequest):
+    """切换/创建会话：重建 EVENT_LOG/LOOP/WATCHER 指向该会话 JSONL。
+
+    事件溯源哲学：状态永不保存，切会话 = 换 JSONL 文件 + 重放。
+    历史会话 JSONL 在磁盘，随时可切回；不存在则自动创建。
+    切换后返回 cursor，前端 WS 重连从此游标增量补发。
+    """
+    global EVENT_LOG, LOOP, WATCHER
+    session_id = req.session_id.strip()
+    if not re.fullmatch(r"[\w\-]{1,64}", session_id):
+        raise HTTPException(status_code=400, detail="非法会话名（仅字母数字 - _，≤64 字符）")
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = SESSION_DIR / f"{session_id}.jsonl"
+    new_log = EventLog(log_path)
+    new_loop = AgentLoop(event_log=new_log, session_id=session_id)
+    new_watcher = TailWatcher(new_log, poll_interval=0.2)
+    # 原子替换：watcher 循环每次迭代读全局 WATCHER，替换后下一轮自动广播新会话事件
+    WATCHER = new_watcher
+    EVENT_LOG = new_log
+    LOOP = new_loop
+    last = new_log.file_last_id()
+    return {"ok": True, "session_id": session_id, "cursor": last, "events": last}
+
+
+@app.get("/events", dependencies=[Depends(require_auth)])
 async def read_events(cursor: int = 0, limit: int = 200):
     """REST 兜底读事件（WebSocket 不可用时）。"""
     if EVENT_LOG is None:
         raise HTTPException(status_code=503, detail="驾驶舱未初始化")
     events = EVENT_LOG.list_after(cursor, limit)
     return {"cursor": events[-1].id if events else cursor, "events": [json.loads(event_to_json(e)) for e in events]}
+
+
+# ========== v1.13 端点：成本驾驶舱 / 上下文面板 / 健康信号 ==========
+
+# 模块级单例（T-H 集成：由 init_cockpit 或测试注入）
+_cost_ledger = None
+_context_metrics = None
+_health_session = None
+_recall_service = None
+# v1.23 落地：AI 贡献报告 / 审批收件箱 / 自动分类器 / Team Kernel
+_contribution_reporter = None
+_approval_inbox = None
+_safety_classifier = None
+_team_kernel = None
+_otel_exporter = None
+
+
+def attach_v113_modules(ledger=None, metrics=None, health=None, recall=None) -> None:
+    """挂载 v1.13 模块实例（server 启动时调用）。"""
+    global _cost_ledger, _context_metrics, _health_session, _recall_service
+    _cost_ledger = ledger
+    _context_metrics = metrics
+    _health_session = health
+    _recall_service = recall
+
+
+def attach_v123_modules(contribution=None, inbox=None, classifier=None, team=None, otel=None) -> None:
+    """挂载 v1.23 模块实例（server 启动时调用）：贡献报告/收件箱/分类器/Team Kernel/OTel。"""
+    global _contribution_reporter, _approval_inbox, _safety_classifier, _team_kernel, _otel_exporter
+    _contribution_reporter = contribution
+    _approval_inbox = inbox
+    _safety_classifier = classifier
+    _team_kernel = team
+    _otel_exporter = otel
+
+
+@app.get("/costs", dependencies=[Depends(require_auth)])
+async def cost_dashboard():
+    """成本驾驶舱：每 Op token 消耗/节省台账 + 高成本操作预警。"""
+    if _cost_ledger is None:
+        return {"enabled": False, "message": "成本台账未挂载"}
+    return {"enabled": True, **{"summary": _cost_ledger.summary(), "by_op_type": _cost_ledger.by_op_type(), "high_cost": [r.to_dict() for r in _cost_ledger.high_cost_ops()]}}
+
+
+@app.get("/context", dependencies=[Depends(require_auth)])
+async def context_panel():
+    """上下文管理面板：四维指标 + 压缩策略对照（A/B 子区）。"""
+    if _context_metrics is None:
+        return {"enabled": False, "message": "上下文指标未挂载"}
+    metrics = _context_metrics.report() if hasattr(_context_metrics, "report") else _context_metrics
+    return {"enabled": True, "metrics": metrics, "policies": ["default", "aggressive_forgetting", "gentle"]}
+
+
+@app.get("/health-signals", dependencies=[Depends(require_auth)])
+async def health_signals():
+    """健康信号：stuck 检测 + 会话健康度（驱动生命周期建议）。"""
+    if _health_session is None:
+        return {"enabled": False, "message": "健康信号未挂载"}
+    return {"enabled": True, "report": _health_session.report().to_dict()}
+
+
+@app.post("/compact", dependencies=[Depends(require_auth)])
+async def manual_compact(req: dict = None):
+    """手动压缩按钮（对标 Claude Code /compact，与 agent 主动 CompressRequest 并存）。"""
+    req = req or {}
+    target = req.get("target", "context")
+    if LOOP is None:
+        raise HTTPException(status_code=503, detail="内核未初始化")
+    from ..protocol import Compact as CompactOp
+
+    LOOP.enqueue_op(CompactOp(target=target))
+    events = LOOP.run_until_idle(max_steps=10)
+    return {"ok": True, "target": target, "events": len(events)}
+
+
+# ========== v1.23 端点：AI 贡献报告 / 审批收件箱 / 分类器审计 / 遥测 ==========
+
+
+@app.get("/api/contribution", dependencies=[Depends(require_auth)])
+async def contribution_report(task_id: str = "task-1"):
+    """AI 贡献报告导出（G17⑧）：纯事件投影，零 LLM。"""
+    if _contribution_reporter is None:
+        return {"enabled": False, "message": "贡献报告投影器未挂载"}
+    report = _contribution_reporter.build(task_id=task_id)
+    return {"enabled": True, "report": report.to_dict()}
+
+
+@app.get("/api/inbox", dependencies=[Depends(require_auth)])
+async def approval_inbox_view():
+    """审批收件箱（G14）：只收分类器拦截/存疑件（人类审拦截件，不审每个动作）。"""
+    if _approval_inbox is None:
+        return {"enabled": False, "message": "审批收件箱未挂载"}
+    items = [
+        {
+            "item_id": i.item_id,
+            "tool_name": i.tool_name,
+            "command": i.command,
+            "verdict_decision": i.verdict_decision,
+            "reason": i.reason,
+            "status": i.status,
+            "created_at": i.created_at,
+        }
+        for i in _approval_inbox.pending()
+    ]
+    return {"enabled": True, "items": items, "stats": _approval_inbox.stats()}
+
+
+@app.post("/api/inbox/respond", dependencies=[Depends(require_auth)])
+async def approval_inbox_respond(req: dict = None):
+    """人工处置收件箱条目（approve/reject/edit）。"""
+    req = req or {}
+    if _approval_inbox is None:
+        raise HTTPException(status_code=503, detail="审批收件箱未挂载")
+    item_id = req.get("item_id", "")
+    decision = req.get("decision", "")
+    if decision not in ("approve", "reject", "edit"):
+        raise HTTPException(status_code=400, detail="非法处置决策")
+    item = _approval_inbox.respond(item_id, decision, edited_command=req.get("edited_command"), operator="web")
+    if item is None:
+        raise HTTPException(status_code=404, detail="条目不存在或已处理")
+    return {"ok": True, "item_id": item_id, "status": item.status}
+
+
+@app.get("/api/classifier", dependencies=[Depends(require_auth)])
+async def classifier_audit():
+    """分类器判决审计（G18）：审批即事件，白盒可查。"""
+    if _safety_classifier is None:
+        return {"enabled": False, "message": "分类器未挂载"}
+    return {
+        "enabled": True,
+        "history": _safety_classifier.history()[-100:],
+        "fallback_human": _safety_classifier.should_fallback_human(),
+    }
+
+
+@app.get("/api/telemetry", dependencies=[Depends(require_auth)])
+async def telemetry_status():
+    """OTel 遥测状态（G13 治理）。"""
+    if _otel_exporter is None:
+        return {"enabled": False, "message": "OTel 导出器未挂载"}
+    return {"enabled": True, "stats": _otel_exporter.stats()}
 
 
 # ========== WebSocket（核心） ==========
@@ -203,8 +385,11 @@ async def websocket_endpoint(ws: WebSocket):
                     continue
             LOOP.enqueue_op(op)
             events = LOOP.run_until_idle(max_steps=50)
-            for ev in events:
-                await _broadcast(ev)
+            # 广播收敛（G3 修复）：事件已通过 EventLog.append 写入 JSONL + 更新 .tail，
+            # TailWatcher 轮询会自动广播——这里不再手动 _broadcast，避免同一事件广播两次
+            # （旧实现：handler 广播一次 + watcher 轮询广播一次 = 前端收到重复事件）
+            _ = events  # 返回值仅用于调试/测试；广播统一走 watcher 通道
+
     except WebSocketDisconnect:
         clients.discard(ws)
     except Exception as e:

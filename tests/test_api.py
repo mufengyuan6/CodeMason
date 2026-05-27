@@ -45,7 +45,7 @@ class TestCockpitSmoke:
         loop = AgentLoop(event_log=web.EVENT_LOG, llm=MockLLM(), session_id="smoke")
         loop.enqueue_op(UserTurnStart(content="冒烟任务"))
         loop.run_until_idle()
-        r = client.get("/events")
+        r = client.get("/events", headers={"x-agent-token": "smoke-token"})
         assert r.status_code == 200
         events = r.json()["events"]
         types = {e["type"] for e in events}
@@ -53,6 +53,15 @@ class TestCockpitSmoke:
         assert "AgentMessageContentDelta" in types
 
     def test_sessions(self, client):
-        r = client.get("/sessions")
+        r = client.get("/sessions", headers={"x-agent-token": "smoke-token"})
         assert r.status_code == 200
         assert isinstance(r.json()["sessions"], list)
+
+    def test_protected_endpoint_rejects_no_token(self, client):
+        """P1-1 修复验证：受保护端点无 token → 401（不再裸奔）。"""
+        assert client.get("/sessions").status_code == 401
+        assert client.get("/events").status_code == 401
+        assert client.get("/costs").status_code == 401
+        assert client.get("/context").status_code == 401
+        assert client.get("/health-signals").status_code == 401
+        assert client.post("/compact", json={"target": "context"}).status_code == 401

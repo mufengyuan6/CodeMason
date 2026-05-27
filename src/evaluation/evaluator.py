@@ -259,3 +259,117 @@ class FailToPassEvaluator:
         
         with open(output_path, 'w') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
+
+
+# ========== v1.13 新增：机读验证门禁 + 上下文四维指标（G7） ==========
+
+
+class VerificationGate:
+    """机读验证门禁（对标 GSD Core）：status=passed 才算完成 + stale 检测 + fail-closed。
+
+    - **fail-closed**：任何 FS 错误/状态文件缺失 → 当未通过，绝不当通过
+    - **stale 检测**：输出比验证新 = 重验（agent 在验证后又改了文件）
+    - 完成判定用机器状态而非模型宣称（堵死"开卷考试"质疑）
+    """
+
+    STATUS_FILE = "verification.json"
+    # 合法完成状态（status=passed 才算完成）
+    PASSED = "passed"
+    FAILED = "failed"
+
+    def __init__(self, workspace: str = ".") -> None:
+        self.workspace = workspace
+
+    def _status_path(self, task_id: str) -> str:
+        import os
+        return os.path.join(self.workspace, f".{task_id}.{self.STATUS_FILE}")
+
+    def write(self, task_id: str, status: str, *, output_ts: Optional[float] = None, evidence: Optional[dict] = None) -> dict:
+        """写入机读状态文件（fail-closed：写失败视为未通过）。"""
+        import os
+        import time as _time
+        data = {
+            "task_id": task_id,
+            "status": status,
+            "verified_at": _time.time(),
+            "output_ts": output_ts,
+            "evidence": evidence or {},
+        }
+        try:
+            os.makedirs(self.workspace, exist_ok=True)
+            with open(self._status_path(task_id), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return data
+        except Exception:
+            # fail-closed：写失败 → 状态当 failed
+            return {"task_id": task_id, "status": self.FAILED, "verified_at": 0, "output_ts": None, "evidence": {"error": "状态文件写入失败"}}
+
+    def is_passed(self, task_id: str, *, output_mtime: Optional[float] = None) -> tuple[bool, str]:
+        """机读判定：status=passed 才算完成；stale 检测（输出比验证新 = 重验）；fail-closed。"""
+        import os
+        try:
+            with open(self._status_path(task_id), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return False, "fail-closed: 无状态文件（未验证）"
+        except Exception as e:
+            return False, f"fail-closed: 状态文件损坏 ({e})"
+        if data.get("status") != self.PASSED:
+            return False, f"status={data.get('status')} (未通过)"
+        # stale 检测：输出比验证新 = 验证后又改了 → 重验
+        if output_mtime is not None:
+            verified_at = data.get("verified_at", 0)
+            if output_mtime > verified_at + 1.0:
+                return False, f"stale: 输出比验证新 (output_mtime={output_mtime:.1f} > verified_at={verified_at:.1f})，需重验"
+        return True, "passed"
+
+    def clear(self, task_id: str) -> None:
+        """清理状态文件（重跑任务前）。"""
+        import os
+        try:
+            os.remove(self._status_path(task_id))
+        except OSError:
+            pass
+
+
+class ContextMetrics:
+    """上下文质量四维指标（G7 评测子项，全部机读可复现）。
+
+    - 回捞次数/会话：agent 重读被压缩/清理区域的频率（越高越差）
+    - stale 命中率：组装进窗口的过期结果占比（应≈0）
+    - 摘要遗漏数：使用中发现缺失的关键决策（应=0）
+    - 压缩比：每次压缩的 token 缩减率
+    """
+
+    def __init__(self) -> None:
+        self.recalls: int = 0
+        self.stale_hits: int = 0
+        self.total_assembled: int = 0
+        self.summary_misses: int = 0
+        self.compression_ratios: list[float] = []
+
+    def observe_recall(self) -> None:
+        self.recalls += 1
+
+    def observe_assembly(self, *, stale: bool = False) -> None:
+        self.total_assembled += 1
+        if stale:
+            self.stale_hits += 1
+
+    def observe_summary_miss(self) -> None:
+        self.summary_misses += 1
+
+    def observe_compression(self, ratio: float) -> None:
+        self.compression_ratios.append(ratio)
+
+    def report(self) -> dict:
+        """四维指标报告（进三区看板上下文区）。"""
+        return {
+            "recall_count": self.recalls,
+            "recall_rate": round(self.recalls / max(self.total_assembled, 1), 3),
+            "stale_hit_rate": round(self.stale_hits / max(self.total_assembled, 1), 3),
+            "summary_misses": self.summary_misses,
+            "avg_compression_ratio": round(sum(self.compression_ratios) / max(len(self.compression_ratios), 1), 3),
+            "compression_events": len(self.compression_ratios),
+            "total_assembled": self.total_assembled,
+        }

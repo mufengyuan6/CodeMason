@@ -2,66 +2,82 @@
 
 from __future__ import annotations
 
-import shlex
-import subprocess
 import time
 from typing import Optional
 
+from ...security.exec_sandbox import SandboxFactory, SandboxProvider
+from ...security.guard import ShellGuard
 from ..base import Tool, ToolContext
 from ..registry import register_tool
 
-# 危险命令黑名单
-DANGEROUS_PATTERNS = ("rm -rf", "rm -fr", "sudo ", "mkfs", "dd if=", ":(){", "> /dev/sda", "chmod -R 777", "git push -f")
+# 工具层最后一道防线（P2 修复：原 DANGEROUS_PATTERNS 死代码从未被检查——
+# 黑名单实际由 security/guard.py 的 ShellGuard 承担，但仅在 plan_act 层调用。
+# 现在 Bash/Monitor 执行前也过 ShellGuard，纵深防御：即使审批层被绕过，工具层仍拦截)。
+_GUARD = ShellGuard()
+
+# G19 执行沙箱（v1.23 落地）：默认工厂按可用性探测自动选层（L3 Firecracker 优先）。
+# 本机无 Docker/FC/E2B → 自动降级受限 local 后端；企业换真环境零改动（换层只换实现）。
+_SANDBOX: Optional[SandboxProvider] = None
+
+
+def set_sandbox(provider: Optional[SandboxProvider]) -> None:
+    """注入沙箱后端（测试/企业部署用）。None 恢复工厂自动选层。"""
+    global _SANDBOX
+    _SANDBOX = provider
+
+
+def _get_sandbox() -> SandboxProvider:
+    global _SANDBOX
+    if _SANDBOX is None:
+        _SANDBOX = SandboxFactory().create()
+    return _SANDBOX
 
 
 class BashTool(Tool):
     name = "Bash"
-    description = "执行 shell 命令（执行类，高危需审批）"
+    description = "执行 shell 命令（执行类，高危需审批；经执行沙箱隔离）"
     parameters = {"command": {"type": "string", "description": "shell 命令"}, "timeout": {"type": "integer", "description": "超时秒数，默认 30"}}
 
     def run(self, args: dict, context: Optional[ToolContext] = None) -> dict:
         command = args["command"]
         timeout = int(args.get("timeout", 30))
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=(context.cwd if context else "."),
-            )
-            return {
-                "status": "ok",
-                "exit_code": result.returncode,
-                "stdout": result.stdout[-5000:],
-                "stderr": result.stderr[-2000:],
-            }
-        except subprocess.TimeoutExpired:
-            return {"status": "error", "error": f"命令超时（{timeout}s）"}
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        # 工具层黑名单硬拦截（确定性，不依赖模型/审批层）
+        guard = _GUARD.check(command)
+        if guard["blocked"]:
+            return {"status": "blocked", "reason": f"ShellGuard 拦截: {guard['reason']}"}
+        # G19 执行沙箱（v1.23 落地）：替代裸 subprocess.run(shell=True)
+        sandbox = _get_sandbox()
+        result = sandbox.run(command, cwd=(context.cwd if context else "."), timeout=timeout)
+        return {
+            "status": "ok" if result.exit_code == 0 else ("error" if result.exit_code is None else "ok"),
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "executor": result.executor,
+            "sandbox_id": result.sandbox_id,
+            "timed_out": result.timed_out,
+        }
 
 
 class MonitorTool(Tool):
     name = "Monitor"
-    description = "监控命令/进程输出（周期采样）"
+    description = "监控命令/进程输出（周期采样；经执行沙箱隔离）"
     parameters = {"command": {"type": "string", "description": "监控命令"}, "interval": {"type": "integer", "description": "采样间隔秒"}}
 
     def run(self, args: dict, context: Optional[ToolContext] = None) -> dict:
         command = args["command"]
         interval = float(args.get("interval", 1.0))
         samples = []
+        # 工具层黑名单硬拦截（同上）
+        guard = _GUARD.check(command)
+        if guard["blocked"]:
+            return {"status": "blocked", "reason": f"ShellGuard 拦截: {guard['reason']}"}
         try:
-            proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=(context.cwd if context else "."))
-            deadline = time.time() + float(args.get("duration", 5))
-            while time.time() < deadline and proc.poll() is None:
-                line = proc.stdout.readline() if proc.stdout else ""
-                if line:
-                    samples.append(line.strip())
-                time.sleep(interval)
-            proc.kill()
-            return {"status": "ok", "samples": samples[-100:], "count": len(samples)}
+            sandbox = _get_sandbox()
+            result = sandbox.run(command, cwd=(context.cwd if context else "."), timeout=interval * 2 + 1)
+            if result.stdout:
+                samples = [line for line in result.stdout.splitlines() if line.strip()]
+            return {"status": "ok", "samples": samples[-100:], "count": len(samples), "executor": result.executor}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 

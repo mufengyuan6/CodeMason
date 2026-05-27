@@ -82,6 +82,22 @@ class TestToolRegistry:
         assert result["exit_code"] == 0
         assert "hello" in result["stdout"]
 
+    def test_bash_tool_blocks_dangerous(self, tmp_path, registry):
+        """P2 修复验证：工具层黑名单硬拦截（ShellGuard，确定性）。"""
+        result = registry.call("Bash", {"command": "rm -rf /etc"}, ToolContext(cwd=str(tmp_path)))
+        assert result["status"] == "blocked"
+        assert "ShellGuard" in result["reason"]
+
+    def test_monitor_tool_blocks_dangerous(self, tmp_path, registry):
+        result = registry.call("Monitor", {"command": "sudo rm -rf /"}, ToolContext(cwd=str(tmp_path)))
+        assert result["status"] == "blocked"
+        assert "ShellGuard" in result["reason"]
+
+    def test_bash_tool_safe_override(self, tmp_path, registry):
+        """SAFE_OVERRIDES：清理临时目录放行（yellow 风险，不 block）。"""
+        result = registry.call("Bash", {"command": "rm -rf /tmp/cleanup-xyz"}, ToolContext(cwd=str(tmp_path)))
+        assert result["status"] != "blocked"
+
     def test_ask_user_tool(self, tmp_path, registry):
         result = registry.call("AskUser", {"question": "继续吗？", "options": ["y", "n"]})
         assert result["status"] == "ask_user"

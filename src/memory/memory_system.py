@@ -1,210 +1,176 @@
-"""三层记忆系统."""
+"""记忆系统：EventLog 事件投影读模型（G12，v1.13 终态）。
 
-import json
+**记忆不是独立存储，是 EventLog 的确定性投影**（读模型，可随时重放重建）——
+会话/审计/回滚三合一，不制造第二事实源（对标 MemStrata / ES Agent Memory）。
+
+v1.13 重写（差异表 ⚔️ Conflict → L1 直上）：
+- 旧实现：三层 key-value（L1/L2/L3 + TTL + consolidate）——非投影、无 supersede、覆盖式写入
+- 新实现：以事件流（EventLog）为唯一事实源，记忆条目从结构化事件订阅投影生成
+- 保留 MemoryManager 兼容 API（remember/recall/get_session_context/consolidate/get_stats）
+"""
+
+from __future__ import annotations
+
 import time
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from typing import Any, Optional
+
+from .backend import JsonlMemoryBackend, MemoryBackend
+from .global_memory import GlobalMemory
+from .project import ProjectMemory
+from .session import SessionMemory
+
+# 记忆投影的确定性来源：结构化事件订阅类型（PostToolUse/Stop hook 沉淀）
+EVENT_KIND_TASK = "task_result"
+EVENT_KIND_TOOL = "tool_result"
+EVENT_KIND_ERROR = "error"
 
 
-@dataclass
-class MemoryEntry:
-    """记忆条目."""
-    key: str
-    value: Any
-    level: int  # 1=short, 2=medium, 3=long
-    timestamp: float
-    access_count: int = 0
-    last_accessed: float = 0.0
+class MemoryProjector:
+    """事件投影器：从事件流（EventLog）确定性投影记忆条目。
 
+    - 记忆捕获 = 结构化事件订阅：error_type/文件/任务类型沉淀为结构化记忆，零 LLM 成本
+    - 每条记忆带 provenance（溯源事件 ID）+ attributed_to + 时态 supersede
+    - compact 不重写事件文件：记忆只读事件流 + sidecar 摘要，永不修改事实源
+    """
 
-class ShortTermMemory:
-    """L1: 短期记忆."""
-    
-    def __init__(self, ttl: int = 86400):  # 24小时
-        self.ttl = ttl
-        self.storage: Dict[str, MemoryEntry] = {}
-    
-    def store(self, key: str, value: Any):
-        """存储记忆."""
-        self.storage[key] = MemoryEntry(
-            key=key,
-            value=value,
-            level=1,
-            timestamp=time.time(),
-            last_accessed=time.time()
-        )
-    
-    def retrieve(self, key: str) -> Optional[Any]:
-        """检索记忆."""
-        entry = self.storage.get(key)
-        if not entry:
+    def __init__(self, backend: Optional[MemoryBackend] = None) -> None:
+        self.backend = backend or JsonlMemoryBackend(".codemason/memory.jsonl")
+
+    def subscribe_event(self, event: dict, *, project_scope: str = "global") -> Optional[str]:
+        """事件订阅：从结构化事件投影记忆（零 LLM、零噪音、完全可审计）。
+
+        事件 shape（由 hook 产生）：
+        - {"kind": "task_result", "task_type": "...", "summary": "...", "success": bool, "steps": int}
+        - {"kind": "error", "error_type": "...", "file": "...", "message": "..."}
+
+        幂等：同 provenance_event_id + kind 不重复投影（重放重建不产生重复条目）。
+        """
+        kind = event.get("kind")
+        if kind not in (EVENT_KIND_TASK, EVENT_KIND_ERROR):
             return None
-        
-        # 检查是否过期
-        if time.time() - entry.timestamp > self.ttl:
-            del self.storage[key]
-            return None
-        
-        # 更新访问信息
-        entry.access_count += 1
-        entry.last_accessed = time.time()
-        
-        return entry.value
-    
-    def get_recent(self, limit: int = 10) -> List[Dict]:
-        """获取最近的记忆."""
-        entries = sorted(
-            self.storage.values(),
-            key=lambda x: x.last_accessed,
-            reverse=True
-        )
-        return [asdict(e) for e in entries[:limit]]
-    
-    def clear_expired(self):
-        """清理过期记忆."""
-        now = time.time()
-        expired = [
-            k for k, v in self.storage.items()
-            if now - v.timestamp > self.ttl
-        ]
-        for k in expired:
-            del self.storage[k]
+        provenance = event.get("event_id")
+        # 幂等检查：同源事件已投影过则跳过（重放重建语义）
+        if provenance is not None:
+            for rec in self.backend.read_all(project_scope=project_scope):
+                if rec.get("provenance_event_id") == provenance and rec.get("type") in ("experience", "error_pattern"):
+                    return rec.get("id")
+        if kind == EVENT_KIND_TASK:
+            return self.backend.append(
+                {
+                    "type": "experience",
+                    "task_type": event.get("task_type", "general"),
+                    "summary": event.get("summary", ""),
+                    "success": event.get("success", False),
+                    "steps": event.get("steps", 0),
+                    "attributed_to": event.get("attributed_to", "assistant"),
+                    "provenance_event_id": event.get("event_id"),
+                },
+                project_scope=project_scope,
+            )
+        if kind == EVENT_KIND_ERROR:
+            return self.backend.append(
+                {
+                    "type": "error_pattern",
+                    "error_type": event.get("error_type", "unknown"),
+                    "file": event.get("file", ""),
+                    "message": event.get("message", "")[:500],
+                    "attributed_to": event.get("attributed_to", "assistant"),
+                    "provenance_event_id": event.get("event_id"),
+                },
+                project_scope=project_scope,
+            )
+        return None
 
-
-class MediumTermMemory:
-    """L2: 中期记忆 - 项目级Bug模式."""
-    
-    def __init__(self, file_path: str = "memory/medium_term.json"):
-        self.file_path = file_path
-        self.patterns: Dict[str, Any] = {}
-        self._load()
-    
-    def store_bug_pattern(self, pattern: Dict):
-        """存储Bug模式."""
-        key = f"bug_{pattern.get('type', 'unknown')}_{int(time.time())}"
-        self.patterns[key] = {
-            'pattern': pattern,
-            'timestamp': time.time(),
-            'count': 1
-        }
-        self._save()
-    
-    def find_similar_bugs(self, error_type: str) -> List[Dict]:
-        """查找相似Bug."""
-        similar = []
-        for key, value in self.patterns.items():
-            if key.startswith(f"bug_{error_type}"):
-                similar.append(value)
-        return similar
-    
-    def _load(self):
-        """加载记忆."""
-        try:
-            with open(self.file_path, 'r') as f:
-                self.patterns = json.load(f)
-        except FileNotFoundError:
-            self.patterns = {}
-    
-    def _save(self):
-        """保存记忆."""
-        import os
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        with open(self.file_path, 'w') as f:
-            json.dump(self.patterns, f, indent=2)
-
-
-class LongTermMemory:
-    """L3: 长期记忆 - 跨项目通用模式."""
-    
-    def __init__(self):
-        self.patterns: Dict[str, Any] = {}
-    
-    def store_general_pattern(self, category: str, pattern: Dict):
-        """存储通用模式."""
-        if category not in self.patterns:
-            self.patterns[category] = []
-        
-        self.patterns[category].append({
-            'pattern': pattern,
-            'timestamp': time.time(),
-            'frequency': 1
-        })
-    
-    def retrieve_patterns(self, category: str) -> List[Dict]:
-        """检索模式."""
-        return self.patterns.get(category, [])
-    
-    def increment_frequency(self, category: str, pattern_id: str):
-        """增加频率计数."""
-        if category in self.patterns:
-            for p in self.patterns[category]:
-                if p.get('pattern', {}).get('id') == pattern_id:
-                    p['frequency'] = p.get('frequency', 0) + 1
+    def replay(self, events: list[dict], *, project_scope: str = "global") -> int:
+        """重放重建：从事件流重新投影全部记忆（确定性读模型，可随时重建）。"""
+        count = 0
+        for ev in events:
+            if self.subscribe_event(ev, project_scope=project_scope) is not None:
+                count += 1
+        return count
 
 
 class MemoryManager:
-    """记忆管理器."""
-    
-    def __init__(self):
-        self.l1_short = ShortTermMemory()
-        self.l2_medium = MediumTermMemory()
-        self.l3_long = LongTermMemory()
-    
-    def remember(self, key: str, value: Any, level: int = 1):
-        """
-        记忆存储.
-        
-        Args:
-            key: 记忆键
-            value: 记忆值
-            level: 记忆级别 (1=short, 2=medium, 3=long)
+    """记忆管理器（兼容 API）：事件投影读模型 + 三视图（会话/项目/全局）。
+
+    旧三层 key-value 语义映射：
+    - remember(key, value, level) → 按 level 路由到 会话/项目事实/全局经验
+    - recall(key, level) → 检索对应视图
+    - consolidate() → 记忆健康整理（归档 + 软衰减清理）
+    """
+
+    def __init__(self, base_dir: str = ".codemason", project_root: str | Path = ".") -> None:
+        from pathlib import Path
+
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.session = SessionMemory(self.base_dir / "session.jsonl")
+        self.project = ProjectMemory(project_root)
+        self.global_memory = GlobalMemory(self.base_dir / "global.json")
+        self.projector = MemoryProjector(JsonlMemoryBackend(self.base_dir / "memory.jsonl"))
+
+    def remember(self, key: str, value: Any, level: int = 1) -> Any:
+        """记忆存储（兼容 API）。
+
+        level 映射（旧三层 → 事件投影视图）：
+        - 1 = 会话视图（append 消息）
+        - 2 = 项目事实表（record fact，agent_inferred 待确认）
+        - 3 = 全局经验（record，success=True）
         """
         if level == 1:
-            self.l1_short.store(key, value)
-        elif level == 2:
-            self.l2_medium.store_bug_pattern(value)
-        elif level == 3:
-            if isinstance(value, dict) and 'category' in value:
-                self.l3_long.store_general_pattern(value['category'], value)
-    
-    def recall(self, key: str, level: int = 1) -> Optional[Any]:
-        """记忆检索."""
-        if level == 1:
-            return self.l1_short.retrieve(key)
+            text = value if isinstance(value, str) else str(value)
+            return self.session.append("memory", text, meta={"key": key})
+        if level == 2:
+            return self.project.add_fact(str(value), trust="agent_inferred")
+        if level == 3:
+            if isinstance(value, dict):
+                return self.global_memory.record(
+                    value.get("task_type", key),
+                    value.get("summary", str(value)),
+                    int(value.get("steps", 0)),
+                    bool(value.get("success", True)),
+                    error_type=value.get("error_type", ""),
+                )
+            return self.global_memory.record(key, str(value), 0, True)
         return None
-    
-    def get_session_context(self, session_id: str) -> Dict:
-        """获取会话上下文."""
+
+    def recall(self, key: str, level: int = 1) -> Optional[Any]:
+        """记忆检索（兼容 API）：会话最近 / 项目规则 / 全局同类经验。"""
+        if level == 1:
+            ctx = self.session.get_context(limit=10)
+            return [m for m in ctx if m.get("meta", {}).get("key") == key] or None
+        if level == 2:
+            for fact in self.project.to_dict().get("facts", []):
+                if key in fact.get("fact", ""):
+                    return fact
+            return None
+        if level == 3:
+            exps = self.global_memory.retrieve(key, limit=3)
+            return exps or None
+        return None
+
+    def get_session_context(self, session_id: str) -> dict:
+        """获取会话上下文（三视图聚合，SessionStart 注入用）。"""
         return {
-            'session_id': session_id,
-            'recent_memories': self.l1_short.get_recent(5),
-            'bug_patterns': self.l2_medium.find_similar_bugs('syntax'),
-            'general_patterns': self.l3_long.retrieve_patterns('optimization')
+            "session_id": session_id,
+            "recent_messages": self.session.get_context(limit=5),
+            "rules": self.project.get_rules_text(),
+            "facts": self.project.to_dict().get("facts", [])[-5:],
+            "pinned_facts": self.project.get_pinned_facts(),
+            "state": self.project.get_state(),
+            "experiences": self.global_memory.stats(),
         }
-    
-    def consolidate(self):
-        """记忆整合 - 从L1到L2/L3的迁移."""
-        # 高频访问的L1记忆提升到L2
-        recent = self.l1_short.get_recent(20)
-        for mem in recent:
-            if mem.get('access_count', 0) > 5:
-                # 提升到L2
-                self.l2_medium.store_bug_pattern({
-                    'type': 'frequent_pattern',
-                    'data': mem
-                })
-        
-        # 清理过期记忆
-        self.l1_short.clear_expired()
-    
-    def get_stats(self) -> Dict:
-        """获取记忆统计."""
+
+    def consolidate(self) -> dict:
+        """记忆整理：归档超期经验 + 投影器 flush（事件投影读模型无重写）。"""
+        archived = self.global_memory.archive_stale()
+        return {"archived": archived, "session_events": len(self.session.get_messages())}
+
+    def get_stats(self) -> dict:
+        """记忆统计。"""
         return {
-            'l1_short_count': len(self.l1_short.storage),
-            'l2_medium_count': len(self.l2_medium.patterns),
-            'l3_long_categories': len(self.l3_long.patterns),
-            'total_patterns': sum(
-                len(p) for p in self.l3_long.patterns.values()
-            )
+            "session_messages": len(self.session.get_messages()),
+            "facts": len(self.project.to_dict().get("facts", [])),
+            "experiences": self.global_memory.stats(),
+            "session_summary": self.session.stats().get("summary", False),
         }

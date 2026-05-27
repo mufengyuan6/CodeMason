@@ -22,6 +22,7 @@ from typing import Optional, Protocol
 from ..protocol import (
     AgentMessageContentDelta,
     ApprovalResponse,
+    ClassifierVerdict,
     Compact,
     ErrorEvent,
     Event,
@@ -54,11 +55,16 @@ class ToolProtocol(Protocol):
 
 
 class EventIdGenerator:
-    """全局递增 Event id（跨进程唯一：进程前缀 + 计数器）。"""
+    """全局递增 Event id（跨进程唯一：进程前缀 + 计数器）。
 
-    def __init__(self, prefix: str = "e") -> None:
+    v1.13 修复：start 参数从磁盘已有最大 id 续起（默认 0）。
+    旧实现每次进程启动从 1 重新计数，与 JSONL 历史事件 id 冲突，
+    破坏断线重连 cursor 增量补发（Event id 是游标基准，见 protocol/events.py）。
+    """
+
+    def __init__(self, prefix: str = "e", start: int = 0) -> None:
         self._prefix = prefix
-        self._seq = 0
+        self._seq = start
 
     def next(self) -> int:
         self._seq += 1
@@ -85,15 +91,24 @@ class AgentLoop:
         self.session_id = session_id
         self.mode = mode
         self.state_machine = StateMachine(max_iterations=max_iterations)
-        self._event_ids = event_id_gen or EventIdGenerator()
+        # P1-6 修复：事件 id 统一走 EventLog.next_event_id()（flock 原子分配，跨进程唯一）。
+        # event_id_gen 参数保留仅为向后兼容（旧调用方显式传入时不再影响 id 生成）。
+        self._event_ids = event_id_gen or EventIdGenerator(start=event_log.last_id())
         self._pending_ops: list[Op] = []  # 提示排队（对标 pi-web prompt queuing）
         self._processed_op_ids: set[str] = set()  # 幂等集合
         self._waiting_approval: Optional[ExecApprovalRequest] = None
         self._turn_index = 0
         self._message_index = 0
         self._cancelled = False
+        # G18 自动安全分类器（v1.23 落地）：None = 使用默认分类器（无 LLM 规则降级）
+        self._classifier: Optional[object] = None
+        self._last_user_message = ""
 
     # ---------- Op 入口 ----------
+
+    def _next_event_id(self) -> int:
+        """事件 id 原子分配（P1-6 修复）：跨进程唯一，走 EventLog 共享计数器。"""
+        return self.event_log.next_event_id()
 
     def enqueue_op(self, op: Op) -> None:
         """Op 入队（agent 忙时排队，跑完自动处理——pi-web prompt queuing）。"""
@@ -164,8 +179,9 @@ class AgentLoop:
 
         if isinstance(op, UserTurnStart):
             self.mode = op.mode
+            self._last_user_message = op.content
             turn_started = TurnStarted(
-                id=self._event_ids.next(),
+                id=self._next_event_id(),
                 session_id=self.session_id,
                 mode=op.mode,
                 turn_index=self._turn_index,
@@ -181,7 +197,7 @@ class AgentLoop:
             return turn_started
         elif isinstance(op, UserTurnCancel):
             self._cancelled = True
-            ev = TurnCancelled(id=self._event_ids.next(), session_id=self.session_id, reason=op.reason, ts=time.time())
+            ev = TurnCancelled(id=self._next_event_id(), session_id=self.session_id, reason=op.reason, ts=time.time())
             self.event_log.append(ev)
             self.state_machine.force_set(AgentState.CANCELLED, TerminationReason.NEEDS_CLARIFICATION)
             return ev
@@ -190,7 +206,7 @@ class AgentLoop:
         elif isinstance(op, Compact):
             # Compact：触发上下文压缩（Phase 3 实现压缩器，此处发完成事件占位）
             ev = ItemCompleted(
-                id=self._event_ids.next(),
+                id=self._next_event_id(),
                 session_id=self.session_id,
                 item_type="turn_summary",
                 item_id=f"compact-{self._turn_index}",
@@ -259,11 +275,42 @@ class AgentLoop:
         tool = tools[0]
         name, args = tool["name"], tool.get("args", {})
 
-        # 审批即事件：风险工具 → WAITING_APPROVAL
+        # G18 自动安全分类器（v1.23 落地）：Tier3 动作过分类器，判决进事件流。
+        # 三级处置：block（硬拦，不执行）/ escalate（升级人工审批）/ allow（放行执行）
+        verdict = self._classify_tool(name, args)
+        if verdict is not None:
+            if verdict["decision"] == "block":
+                # 硬拦：拒绝带原因（不静默吞），agent 可看到理由
+                self._emit_message(f"安全分类器拦截 {name}: {verdict['reason']}")
+                self.state_machine.transition(AgentState.FINISHED, meta={"reason": "classifier_blocked"})
+                self.state_machine.termination_reason = TerminationReason.NEEDS_CLARIFICATION
+                return None
+            if verdict["decision"] == "escalate":
+                # 升级人工审批：发 ExecApprovalRequest（收件箱/审批中心展示）
+                approval = ExecApprovalRequest(
+                    id=self._next_event_id(),
+                    session_id=self.session_id,
+                    approval_id=f"appr-{self._turn_index}-{self.state_machine.steps}",
+                    tool_name=name,
+                    description=self._describe_tool(name, args),
+                    command=args.get("command", ""),
+                    risk_level="red",
+                    diff_preview=args.get("diff_preview"),
+                    ts=time.time(),
+                )
+                self.event_log.append(approval)
+                self._waiting_approval = approval
+                self.state_machine.transition(AgentState.WAITING_APPROVAL)
+                return approval
+            # allow → 低风险进入执行
+            self.state_machine.transition(AgentState.EXECUTING)
+            return None
+
+        # 回退：分类器未启用时走既有风险评估（审批即事件）
         risk = self._assess_risk(name, args)
         if risk in ("red", "yellow"):
             approval = ExecApprovalRequest(
-                id=self._event_ids.next(),
+                id=self._next_event_id(),
                 session_id=self.session_id,
                 approval_id=f"appr-{self._turn_index}-{self.state_machine.steps}",
                 tool_name=name,
@@ -303,7 +350,7 @@ class AgentLoop:
             InternalEvent(type=InternalEventType.TOOL_RESULT, content=result, turn_index=self._turn_index)
         )
         item = ItemCompleted(
-            id=self._event_ids.next(),
+            id=self._next_event_id(),
             session_id=self.session_id,
             item_type="tool_result",
             item_id=f"{name}-{self.state_machine.steps}",
@@ -343,7 +390,7 @@ class AgentLoop:
             InternalEvent(type=InternalEventType.TOOL_RESULT, content=result, turn_index=self._turn_index)
         )
         item = ItemCompleted(
-            id=self._event_ids.next(),
+            id=self._next_event_id(),
             session_id=self.session_id,
             item_type="tool_result",
             item_id=f"{name}-approved",
@@ -373,7 +420,7 @@ class AgentLoop:
         """内部事件处理（Phase 1 最小化：仅记录，后续扩展钩子）。"""
         if ev.type == InternalEventType.ERROR:
             err = ErrorEvent(
-                id=self._event_ids.next(),
+                id=self._next_event_id(),
                 session_id=self.session_id,
                 message=str(ev.content),
                 error_type=ev.meta.get("error_type", "unknown"),
@@ -386,7 +433,7 @@ class AgentLoop:
     def _emit_message(self, text: str) -> AgentMessageContentDelta:
         """发送 Agent 消息（流式增量，一次完整发送）。"""
         delta = AgentMessageContentDelta(
-            id=self._event_ids.next(),
+            id=self._next_event_id(),
             session_id=self.session_id,
             message_index=self._message_index,
             delta=text,
@@ -400,7 +447,7 @@ class AgentLoop:
     def _emit_summary(self) -> ItemCompleted:
         """回合总结事件。"""
         summary = ItemCompleted(
-            id=self._event_ids.next(),
+            id=self._next_event_id(),
             session_id=self.session_id,
             item_type="turn_summary",
             item_id=f"turn-{self._turn_index}",
@@ -409,6 +456,71 @@ class AgentLoop:
         )
         self.event_log.append(summary)
         return summary
+
+    def set_classifier(self, classifier: object) -> None:
+        """注入自动安全分类器（G18）。None 恢复默认（走静态风险评估）。"""
+        self._classifier = classifier
+
+    def _classify_tool(self, name: str, args: dict) -> Optional[dict]:
+        """G18 自动安全分类（v1.23 落地）：Tier3 动作过分类器，判决作为 ClassifierVerdict 事件落盘。
+
+        返回 None = 分类器未启用（走既有审批流程）。
+        返回 dict = {decision: allow/block/escalate, reason, ...}（allow 已包含）
+        """
+        if self._classifier is None:
+            return None
+        from ..security import ClassifierInput
+
+        try:
+            inp = ClassifierInput(
+                tool_name=name,
+                args=args,
+                user_message=self._last_user_message,
+                session_id=self.session_id,
+                op_id=getattr(self, "_current_op_id", ""),
+            )
+            verdict = self._classifier.classify(inp)
+        except Exception as e:
+            # 分类器异常 → 保守 escalate（fail-closed 不 fail-open）
+            self.event_log.append(
+                ClassifierVerdict(
+                    id=self._next_event_id(),
+                    session_id=self.session_id,
+                    tool_name=name,
+                    command=str(args.get("command", "")),
+                    decision="escalate",
+                    reason=f"分类器异常 fail-closed: {e}",
+                    tier=3,
+                    confidence=0.0,
+                    stage="fallback",
+                    ts=time.time(),
+                )
+            )
+            return {"decision": "escalate", "reason": f"分类器异常 fail-closed: {e}"}
+        # 审批即事件：判决 100% 落盘可审计
+        self.event_log.append(
+            ClassifierVerdict(
+                id=self._next_event_id(),
+                session_id=self.session_id,
+                tool_name=name,
+                command=str(args.get("command", "")),
+                decision=verdict.decision,
+                reason=verdict.reason,
+                tier=verdict.tier,
+                confidence=verdict.confidence,
+                stage=verdict.stage,
+                suggested_alternative=verdict.suggested_alternative,
+                ts=time.time(),
+            )
+        )
+        return {
+            "decision": verdict.decision,
+            "reason": verdict.reason,
+            "tier": verdict.tier,
+            "confidence": verdict.confidence,
+            "stage": verdict.stage,
+            "suggested_alternative": verdict.suggested_alternative,
+        }
 
     @staticmethod
     def _assess_risk(name: str, args: dict) -> str:

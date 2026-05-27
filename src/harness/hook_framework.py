@@ -18,12 +18,49 @@ from typing import Callable, Optional
 
 
 class HookEvent(str, Enum):
-    """Hook 事件点（扩展自旧 pre/post 双阶段）。"""
+    """Hook 事件点（v1.13：从 4 点扩展为生命周期 7 点，对标 planning-with-files）。
 
-    TOOL_CALL = "on_tool_call"      # 工具调用前
-    EDIT = "on_edit"                # 变更 apply 前（作用 staging）
+    7 生命周期事件点：
+    - SESSION_START   会话启动/恢复/压缩后加载记忆与规划上下文
+    - USER_PROMPT_SUBMIT  每轮注入记忆与 plan 头（结构感知只取当前进行态）
+    - PRE_TOOL_USE    工具调用前注入 30 行短上下文省 token
+    - POST_TOOL_USE   工具调用后对照 plan 检查变更合规 + 记忆捕获
+    - PRE_COMPACT     压缩前确保状态落盘 + 记录上下文余量
+    - STOP            回合结束做确定性完成判定
+    - FAILURE         失败时（错误归因 + 卡检测）
+
+    旧 4 点保留为别名（兼容既有代码，不破坏 183 测试基线）：
+    - TOOL_CALL == PRE_TOOL_USE
+    - EDIT（staging 变更 apply 前）——独立于 7 点的 staging 语义
+    - COMMIT（提交前）
+    - FAILURE == 7 点之 FAILURE
+    """
+
+    # 生命周期 7 点（v1.13 新增，对标 planning-with-files）
+    SESSION_START = "on_session_start"
+    USER_PROMPT_SUBMIT = "on_user_prompt_submit"
+    PRE_TOOL_USE = "on_pre_tool_use"
+    POST_TOOL_USE = "on_post_tool_use"
+    PRE_COMPACT = "on_pre_compact"
+    STOP = "on_stop"
+    # 既有 4 点（别名兼容）
+    TOOL_CALL = "on_tool_call"      # == PRE_TOOL_USE 语义（工具调用前）
+    EDIT = "on_edit"                # 变更 apply 前（作用 staging，G11）
     COMMIT = "on_commit"            # 提交前
-    FAILURE = "on_failure"          # 失败时
+    FAILURE = "on_failure"          # 失败时（与 7 点 FAILURE 合并语义）
+
+    @property
+    def lifecycle(self) -> bool:
+        """是否属于 v1.13 生命周期 7 点（用于 health 消费者注册）。"""
+        return self in (
+            HookEvent.SESSION_START,
+            HookEvent.USER_PROMPT_SUBMIT,
+            HookEvent.PRE_TOOL_USE,
+            HookEvent.POST_TOOL_USE,
+            HookEvent.PRE_COMPACT,
+            HookEvent.STOP,
+            HookEvent.FAILURE,
+        )
 
 
 class HookPriority(Enum):

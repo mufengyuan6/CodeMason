@@ -211,3 +211,80 @@ class TestAgentLoop:
         assert "TurnStarted" in types
         assert "AgentMessageContentDelta" in types
         assert "ItemCompleted" in types
+
+
+class TestG18ClassifierIntegration:
+    """G18 自动安全分类器接入 AgentLoop（v1.23 落地）。"""
+
+    def test_classifier_block_hard_deny(self, tmp_path):
+        """hard-deny 命中 → 分类器拦截，不执行工具，不进入 EXECUTING。"""
+        from src.security import AutoSafetyClassifier
+
+        tools = MockTools(tools=[{"name": "Bash", "args": {"command": "rm -rf /"}}])
+        loop = make_loop(tmp_path, llm=MockLLM(), tools=tools, session_id="s1")
+        loop.set_classifier(AutoSafetyClassifier())
+        loop.enqueue_op(UserTurnStart(content="清理"))
+        loop.run_until_idle()
+        # 工具未被调用（block 后不执行）
+        assert tools.calls == []
+        assert loop.state_machine.is_terminal()
+        # ClassifierVerdict 事件落盘（审批即事件）
+        events = loop.event_log.read_all()
+        verdicts = [e for e in events if e.type.value == "ClassifierVerdict"]
+        assert len(verdicts) >= 1
+        assert verdicts[-1].decision == "block"
+
+    def test_classifier_allow_executes(self, tmp_path):
+        """allow → 工具正常执行。"""
+        from src.security import AutoSafetyClassifier
+
+        tools = MockTools(tools=[{"name": "Bash", "args": {"command": "ls -la"}}], results={"Bash": {"status": "ok", "exit_code": 0}})
+        loop = make_loop(tmp_path, llm=MockLLM(), tools=tools, session_id="s1")
+        loop.set_classifier(AutoSafetyClassifier())
+        loop.enqueue_op(UserTurnStart(content="看目录"))
+        loop.run_until_idle()
+        assert len(tools.calls) == 1
+        events = loop.event_log.read_all()
+        verdicts = [e for e in events if e.type.value == "ClassifierVerdict"]
+        assert verdicts and verdicts[-1].decision == "allow"
+
+    def test_classifier_escalate_goes_approval(self, tmp_path):
+        """escalate（存疑）→ 升级人工审批（ExecApprovalRequest + WAITING_APPROVAL）。"""
+        from src.security import AutoSafetyClassifier
+
+        # stage2 规则精判 escalate：危险工具但非 hard-deny（git push 非强推、长命令触发 stage2）
+        tools = MockTools(tools=[{"name": "Bash", "args": {"command": "git status && git push origin feature-branch && git log --oneline -3"}}])
+        loop = make_loop(tmp_path, llm=MockLLM(), tools=tools, session_id="s1")
+        loop.set_classifier(AutoSafetyClassifier())
+        loop.enqueue_op(UserTurnStart(content="推送分支"))
+        loop.run_until_idle()
+        events = loop.event_log.read_all()
+        approvals = [e for e in events if e.type.value == "ExecApprovalRequest"]
+        assert len(approvals) >= 1  # escalate → 人工审批
+        verdicts = [e for e in events if e.type.value == "ClassifierVerdict"]
+        assert verdicts and verdicts[-1].decision == "escalate"
+
+    def test_classifier_tier1_bypass(self, tmp_path):
+        """Tier1 工具不过分类器（零延迟）。"""
+        from src.security import AutoSafetyClassifier
+
+        tools = MockTools(tools=[{"name": "Read", "args": {"path": "a.py"}}])
+        loop = make_loop(tmp_path, llm=MockLLM(), tools=tools, session_id="s1")
+        loop.set_classifier(AutoSafetyClassifier())
+        loop.enqueue_op(UserTurnStart(content="读文件"))
+        loop.run_until_idle()
+        assert len(tools.calls) == 1  # 直接执行
+        events = loop.event_log.read_all()
+        # Tier1 动作也产生判决事件（tier=1），但 decision=allow
+        verdicts = [e for e in events if e.type.value == "ClassifierVerdict"]
+        assert all(v.decision == "allow" for v in verdicts)
+
+    def test_classifier_disabled_fallback_legacy(self, tmp_path):
+        """分类器未注入 → 走既有风险评估（审批即事件）。"""
+        tools = MockTools(tools=[{"name": "Bash", "args": {"command": "rm -rf /"}}])
+        loop = make_loop(tmp_path, llm=MockLLM(), tools=tools, session_id="s1")
+        loop.enqueue_op(UserTurnStart(content="清理"))
+        loop.run_until_idle()
+        events = loop.event_log.read_all()
+        approvals = [e for e in events if e.type.value == "ExecApprovalRequest"]
+        assert len(approvals) >= 1  # 旧审批流仍工作

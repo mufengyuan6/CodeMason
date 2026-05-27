@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,20 +32,28 @@ class StagedChange:
     created_at: float = field(default_factory=time.time)
     status: str = "pending"  # pending / applied / rejected / blocked
     hook_results: list[dict] = field(default_factory=list)
+    attestation: Optional[str] = None  # SHA256 完整性校验（v1.13 G11）
 
 
 class StagingSandbox:
-    """Staging 沙盒：变更暂存 + Hook 验证 + apply。"""
+    """Staging 沙盒：变更暂存 + Hook 验证 + apply（含 attestation 完整性校验）。"""
 
     def __init__(self, hooks: Optional[list[Callable[[StagedChange], dict]]] = None) -> None:
         self._changes: dict[str, StagedChange] = {}
         self._hooks = hooks or []
         self._seq = 0
 
+    @staticmethod
+    def _sha256(change: StagedChange) -> str:
+        """变更集 SHA256 摘要（attestation）：old+new+path 组合哈希。"""
+        payload = f"{change.path}|{change.old_content}|{change.new_content}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
     def stage(self, path: str, old_content: str, new_content: str) -> StagedChange:
-        """暂存一个变更（不落盘）。"""
+        """暂存一个变更（不落盘）。生成 attestation 摘要（审批后比对）。"""
         self._seq += 1
         change = StagedChange(change_id=f"stg-{self._seq}", path=path, old_content=old_content, new_content=new_content)
+        change.attestation = self._sha256(change)
         self._changes[change.change_id] = change
         return change
 
@@ -74,8 +84,18 @@ class StagingSandbox:
         change.status = "pending" if passed else "blocked"
         return passed
 
+    def verify_attestation(self, change: StagedChange) -> bool:
+        """Attestation 完整性校验（G11）：apply 前比对 SHA256——防"审批后内容被偷偷改动"。
+
+        篡改 = 拒绝 apply 并告警（Web 审批中心确认的 staging 内容与落盘内容必须一致）。
+        """
+        current = self._sha256(change)
+        if change.attestation is None:
+            return False
+        return current == change.attestation
+
     def apply(self, change_id: str, *, hooks_ok: bool = True) -> dict:
-        """apply 到工作区（Hook 通过才允许）。零回滚成本：拦截 = 移除变更。"""
+        """apply 到工作区（Hook 通过 + attestation 校验通过才允许）。零回滚成本：拦截 = 移除变更。"""
         change = self._changes.get(change_id)
         if change is None:
             return {"status": "error", "error": f"未知变更: {change_id}"}
@@ -83,6 +103,10 @@ class StagingSandbox:
             return {"status": "blocked", "reason": [r.get("reason") for r in change.hook_results]}
         if hooks_ok and not self.run_hooks(change):
             return {"status": "blocked", "reason": [r.get("reason") for r in change.hook_results]}
+        # Attestation 校验：审批内容与落盘内容必须一致（防篡改）
+        if not self.verify_attestation(change):
+            change.status = "blocked"
+            return {"status": "tampered", "reason": "Attestation 校验失败：审批后的变更内容被修改，拒绝 apply"}
         p = Path(change.path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(change.new_content, encoding="utf-8")

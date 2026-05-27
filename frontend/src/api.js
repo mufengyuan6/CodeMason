@@ -7,6 +7,24 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 const TOKEN = 'demo-token' // 前端演示 token（生产从 /auth/token 获取）
 
+/** 拉取会话列表（对标 pi-web：按工作目录组织）。 */
+export async function fetchSessions() {
+  const res = await fetch('/sessions', { headers: { 'x-agent-token': TOKEN } })
+  if (!res.ok) throw new Error('加载会话列表失败')
+  return (await res.json()).sessions || []
+}
+
+/** 切换/创建会话：换 JSONL + 重放（事件溯源：状态永不保存，文件即真相）。 */
+export async function switchSession(sessionId) {
+  const res = await fetch('/sessions/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-agent-token': TOKEN },
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+  if (!res.ok) throw new Error('切换会话失败')
+  return res.json()
+}
+
 export function useCockpit({ sessionId = 'web', onEvent } = {}) {
   const [connected, setConnected] = useState(false)
   const [events, setEvents] = useState([])
@@ -18,6 +36,9 @@ export function useCockpit({ sessionId = 'web', onEvent } = {}) {
   useEffect(() => {
     let closed = false
     let retry = 0
+
+    // 会话切换 → cursor 归零（不同会话的游标独立，从该会话开头增量补发）
+    cursorRef.current = 0
 
     function connect() {
       if (closed) return
@@ -54,6 +75,7 @@ export function useCockpit({ sessionId = 'web', onEvent } = {}) {
     return () => {
       closed = true
       wsRef.current?.close()
+      setEvents([])
     }
   }, [sessionId])
 

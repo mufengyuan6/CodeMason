@@ -9,15 +9,24 @@ from pydantic import TypeAdapter, ValidationError
 
 from .events import (
     AgentMessageContentDelta,
+    ClassifierVerdict,
+    Condensation,
     Error as ErrorEvent,
     Event,
+    EventRecall,
+    EventStale,
     EventType,
     EventUnion,
     ExecApprovalRequest,
+    Inject,
     ItemCompleted,
     Rollback,
+    SnapshotCreated,
+    TraceRecord,
     TurnCancelled,
     TurnStarted,
+    WriteLockGranted,
+    WriteLockReleased,
 )
 from .ops import (
     ApprovalResponse,
@@ -52,6 +61,16 @@ __all__ = [
     "TurnCancelled",
     "ErrorEvent",
     "Rollback",
+    "Inject",
+    "Condensation",
+    "EventStale",
+    "EventRecall",
+    # v1.23 落地新增
+    "ClassifierVerdict",
+    "TraceRecord",
+    "WriteLockGranted",
+    "WriteLockReleased",
+    "SnapshotCreated",
     # 工具函数
     "parse_op",
     "parse_event",

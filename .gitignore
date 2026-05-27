@@ -50,6 +50,7 @@ docs/
 参考/
 references/
 参考文档/
+reference-repos/
 *.docx
 *.pdf
 *.epub
@@ -79,7 +80,11 @@ frontend/test-results.bak/
 frontend/test-results_*/
 frontend/playwright-report/
 frontend/e2e_shots/
+frontend/e2e/zz-*.spec.js
 
 # 前端构建
 frontend/dist/
 frontend/node_modules/
+a.py
+a.py
+*.timestamp-*.mjs
