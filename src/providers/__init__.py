@@ -1,4 +1,4 @@
-"""Provider 层：抽象基类 + OpenAI 兼容实现 + Mock。"""
+"""Provider 层：抽象基类 + OpenAI 兼容实现 + Mock + 智能重试 + 流中断恢复。"""
 
 from .base import (
     BaseProvider,
@@ -8,6 +8,8 @@ from .base import (
     ProviderError,
     ProviderRateLimited,
 )
+from .resume import JsonlHalfLineRecovery, RecoveryMode, StreamRecoveryPolicy, StreamStatus
+from .retry import CircuitBreaker, ErrorClass, RetryEngine, RetryPolicy, RetryResult
 
 __all__ = [
     "BaseProvider",
@@ -16,4 +18,13 @@ __all__ = [
     "ProviderConfig",
     "ProviderError",
     "ProviderRateLimited",
+    "RetryEngine",
+    "RetryPolicy",
+    "RetryResult",
+    "ErrorClass",
+    "CircuitBreaker",
+    "StreamRecoveryPolicy",
+    "RecoveryMode",
+    "StreamStatus",
+    "JsonlHalfLineRecovery",
 ]

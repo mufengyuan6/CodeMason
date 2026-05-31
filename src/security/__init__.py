@@ -3,6 +3,7 @@
 from .approval import ApprovalManager, ApprovalRecord
 from .classifier import AutoSafetyClassifier, ClassifierInput, Verdict
 from .classifier_rules import ClassifierRules, RuleMatch, classify_tier
+from .credentials import CredentialStore, scrub_event_content
 from .ensemble import EnsembleAnalyzer, LlmAnalyzer, StaticAnalyzer
 from .exec_sandbox import (
     DockerSandbox,
@@ -33,6 +34,8 @@ __all__ = [
     "RuleMatch",
     "Verdict",
     "classify_tier",
+    "CredentialStore",
+    "scrub_event_content",
     "SandboxProvider",
     "SandboxConfig",
     "SandboxResult",
