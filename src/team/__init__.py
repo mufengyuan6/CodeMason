@@ -3,10 +3,12 @@
 - kernel.py：单写者协调（WriteLockGranted/Released 事件 + 并行读者 context firewall）
 - triggers.py：团队触发形态（GitHub Issue/PR @agent + Webhook 接 Slack/飞书）
 - permission_matrix.py：团队权限矩阵（team/department/org 三级）
+- agents_md.py：AGENTS.md 渐进式披露模板（G13 v1.22 治理）
 """
 
+from .agents_md import AgentsMdManager, AgentsMdTemplate, AgentsMdValidator
 from .kernel import TeamKernel, WriteLock
 from .permission_matrix import PermissionMatrix
 from .triggers import TeamTriggers, TriggerEvent
 
-__all__ = ["TeamKernel", "WriteLock", "TeamTriggers", "TriggerEvent", "PermissionMatrix"]
+__all__ = ["TeamKernel", "WriteLock", "TeamTriggers", "TriggerEvent", "PermissionMatrix", "AgentsMdManager", "AgentsMdTemplate", "AgentsMdValidator"]
