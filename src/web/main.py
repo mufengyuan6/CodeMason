@@ -206,6 +206,13 @@ _approval_inbox = None
 _safety_classifier = None
 _team_kernel = None
 _otel_exporter = None
+# v1.23 落地③/④：指标投影 / 控制平面 / 按 Op 路由 / 代码图谱 AST / Loop 调度
+_metrics_projector = None
+_policy_engine = None
+_runtime_controller = None
+_op_router = None
+_ast_index = None
+_loop_scheduler = None
 
 
 def attach_v113_modules(ledger=None, metrics=None, health=None, recall=None) -> None:
@@ -225,6 +232,17 @@ def attach_v123_modules(contribution=None, inbox=None, classifier=None, team=Non
     _safety_classifier = classifier
     _team_kernel = team
     _otel_exporter = otel
+
+
+def attach_v123b_modules(metrics=None, policy=None, runtime=None, router=None, ast=None, scheduler=None) -> None:
+    """挂载 v1.23 落地③④模块实例：指标投影/策略引擎/运行时干预/按 Op 路由/AST 索引/调度器。"""
+    global _metrics_projector, _policy_engine, _runtime_controller, _op_router, _ast_index, _loop_scheduler
+    _metrics_projector = metrics
+    _policy_engine = policy
+    _runtime_controller = runtime
+    _op_router = router
+    _ast_index = ast
+    _loop_scheduler = scheduler
 
 
 @app.get("/costs", dependencies=[Depends(require_auth)])
@@ -332,6 +350,65 @@ async def telemetry_status():
     if _otel_exporter is None:
         return {"enabled": False, "message": "OTel 导出器未挂载"}
     return {"enabled": True, "stats": _otel_exporter.stats()}
+
+
+# ========== v1.23 落地③④端点：指标/控制平面/按 Op 路由/AST 索引/调度 ==========
+
+
+@app.get("/api/metrics", dependencies=[Depends(require_auth)])
+async def metrics_dashboard():
+    """指标投影（G17③）：任务成功率/工具准确率/延迟/成本/失败分布。"""
+    if _metrics_projector is None:
+        return {"enabled": False, "message": "指标投影器未挂载"}
+    return {"enabled": True, "report": _metrics_projector.report()}
+
+
+@app.get("/api/control/policy", dependencies=[Depends(require_auth)])
+async def control_policy_view():
+    """策略即代码（G14 v1.23）：策略规则 + 执行审计。"""
+    if _policy_engine is None:
+        return {"enabled": False, "message": "策略引擎未挂载"}
+    return {"enabled": True, "policy": _policy_engine.policy.to_dict(), "audit": _policy_engine.audit(limit=50)}
+
+
+@app.post("/api/control/intervene", dependencies=[Depends(require_auth)])
+async def control_intervene(req: dict = None):
+    """运行时干预（G14 v1.23）：对话中途换模型/切模式/改策略/cancel。"""
+    req = req or {}
+    if _runtime_controller is None:
+        raise HTTPException(status_code=503, detail="运行时控制器未挂载")
+    kind = req.get("kind", "")
+    if kind not in ("switch_model", "switch_mode", "update_policy", "cancel"):
+        raise HTTPException(status_code=400, detail="非法干预类型")
+    iv = _runtime_controller.intervene(kind, target=req.get("target", ""), reason=req.get("reason", ""))
+    return {"ok": True, "intervention": iv.to_dict()}
+
+
+@app.get("/api/routing", dependencies=[Depends(require_auth)])
+async def routing_stats():
+    """按 Op 分派路由（4.1 v1.23）：分派统计 + 合规审计。"""
+    if _op_router is None:
+        return {"enabled": False, "message": "Op 路由未挂载"}
+    return {"enabled": True, "stats": _op_router.stats(), "audit": _op_router.audit(limit=50)}
+
+
+@app.get("/api/ast-index", dependencies=[Depends(require_auth)])
+async def ast_index_query(q: str = ""):
+    """代码图谱 AST 索引查询（4.1b v1.23）：一次查询替代 N 次 grep。"""
+    if _ast_index is None:
+        return {"enabled": False, "message": "AST 索引未挂载"}
+    if not q:
+        return {"enabled": True, "stats": _ast_index.stats(), "query": ""}
+    result = _ast_index.query(q)
+    return {"enabled": True, "query": q, "matches": result.matches, "token_estimate": result.token_estimate}
+
+
+@app.get("/api/scheduler", dependencies=[Depends(require_auth)])
+async def scheduler_view():
+    """Loop 调度规则 + 触发历史（G14 Automations）。"""
+    if _loop_scheduler is None:
+        return {"enabled": False, "message": "调度器未挂载"}
+    return {"enabled": True, "rules": _loop_scheduler.rules(), "history": _loop_scheduler.history(limit=20)}
 
 
 # ========== WebSocket（核心） ==========

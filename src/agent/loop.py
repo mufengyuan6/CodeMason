@@ -103,6 +103,28 @@ class AgentLoop:
         # G18 自动安全分类器（v1.23 落地）：None = 使用默认分类器（无 LLM 规则降级）
         self._classifier: Optional[object] = None
         self._last_user_message = ""
+        # v1.23 落地③/④ 集成（可注入，None = 关闭）：调度/预算/按 Op 路由/策略
+        self._scheduler = None       # LoopScheduler：调度触发 → UserTurnStart 入队
+        self._budget = None          # LoopBudget：每 Op 记账 + 超限熔断
+        self._op_router = None       # OpRouter：按工具名分派档位（成本归因）
+        self._policy_engine = None   # PolicyEngine：工具执行前策略判定
+        self._last_policy_reason = ""
+
+    def set_scheduler(self, scheduler: object) -> None:
+        """注入 LoopScheduler（调度触发接入）。"""
+        self._scheduler = scheduler
+
+    def set_budget(self, budget: object) -> None:
+        """注入 LoopBudget（token 硬预算记账 + 熔断）。"""
+        self._budget = budget
+
+    def set_op_router(self, op_router: object) -> None:
+        """注入 OpRouter（按 Op 分派，成本归因 + 合规审计）。"""
+        self._op_router = op_router
+
+    def set_policy_engine(self, policy_engine: object) -> None:
+        """注入 PolicyEngine（策略即代码：工具执行前 deny/require_approval 判定）。"""
+        self._policy_engine = policy_engine
 
     # ---------- Op 入口 ----------
 
@@ -274,6 +296,22 @@ class AgentLoop:
         # Phase 1 简化：只调第一个工具（Phase 3 起由 LLM 决策调用序列）
         tool = tools[0]
         name, args = tool["name"], tool.get("args", {})
+
+        # v1.23 落地③：策略即代码（PolicyEngine）——企业管理面先于运行时防御。
+        # deny → 硬拦；require_approval → 升级人工审批（与分类器 escalate 同路径）
+        policy_decision = self._apply_policy(name, args)
+        if policy_decision is not None:
+            if policy_decision == "deny":
+                self._emit_message(f"策略拒绝 {name}: {self._last_policy_reason}")
+                self.state_machine.transition(AgentState.FINISHED, meta={"reason": "policy_denied"})
+                self.state_machine.termination_reason = TerminationReason.NEEDS_CLARIFICATION
+                return None
+            if policy_decision == "require_approval":
+                return self._emit_approval(name, args, risk_level="red")
+            # require_judge → 放行（judge 验证在 verify 层），继续
+
+        # v1.23 落地③：按 Op 分派记账（成本归因 + 合规审计）
+        self._route_op(name)
 
         # G18 自动安全分类器（v1.23 落地）：Tier3 动作过分类器，判决进事件流。
         # 三级处置：block（硬拦，不执行）/ escalate（升级人工审批）/ allow（放行执行）
@@ -460,6 +498,50 @@ class AgentLoop:
     def set_classifier(self, classifier: object) -> None:
         """注入自动安全分类器（G18）。None 恢复默认（走静态风险评估）。"""
         self._classifier = classifier
+
+    def _apply_policy(self, name: str, args: dict) -> Optional[str]:
+        """v1.23 落地③：策略即代码（PolicyEngine）判定。
+
+        返回 None = 策略放行；"deny"/"require_approval"/"require_judge" = 策略处置。
+        未注入策略引擎 → None（不拦截）。
+        """
+        if self._policy_engine is None:
+            return None
+        try:
+            resource = str(args.get("command") or args.get("path") or args.get("file_path") or "*")
+            result = self._policy_engine.evaluate(name, resource)
+            self._last_policy_reason = result.get("reason", "")
+            decision = result.get("decision", "allow")
+            return None if decision == "allow" else decision
+        except Exception:
+            return None  # 策略引擎异常 → 不阻断（fail-open 由分类器兜底）
+
+    def _route_op(self, name: str) -> None:
+        """v1.23 落地③：按 Op 分派记账（成本归因 + 合规审计）。"""
+        if self._op_router is None:
+            return
+        try:
+            self._op_router.route(name)
+        except Exception:
+            pass
+
+    def _emit_approval(self, name: str, args: dict, risk_level: str = "red") -> ExecApprovalRequest:
+        """构造审批请求事件（策略 require_approval / 分类器 escalate 共用）。"""
+        approval = ExecApprovalRequest(
+            id=self._next_event_id(),
+            session_id=self.session_id,
+            approval_id=f"appr-{self._turn_index}-{self.state_machine.steps}",
+            tool_name=name,
+            description=self._describe_tool(name, args),
+            command=args.get("command", ""),
+            risk_level=risk_level,
+            diff_preview=args.get("diff_preview"),
+            ts=time.time(),
+        )
+        self.event_log.append(approval)
+        self._waiting_approval = approval
+        self.state_machine.transition(AgentState.WAITING_APPROVAL)
+        return approval
 
     def _classify_tool(self, name: str, args: dict) -> Optional[dict]:
         """G18 自动安全分类（v1.23 落地）：Tier3 动作过分类器，判决作为 ClassifierVerdict 事件落盘。
