@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  coding-agent:
+  codemason:
     build: .
     ports:
       - "8765:8765"
@@ -15,9 +15,9 @@ services:
   postgres:
     image: postgres:15-alpine
     environment:
-      POSTGRES_USER: coding_agent
-      POSTGRES_PASSWORD: coding_agent
-      POSTGRES_DB: coding_agent
+      POSTGRES_USER: codemason
+      POSTGRES_PASSWORD: codemason
+      POSTGRES_DB: codemason
     ports:
       - "5432:5432"
     volumes:
