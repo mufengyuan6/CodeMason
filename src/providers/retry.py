@@ -76,6 +76,22 @@ class RetryPolicy:
             return False
         return (time.time() - start_ts) >= self.time_budget
 
+    def policy_key(self) -> str:
+        """策略标识序列化（v1.26，G6 重试状态事件化）。
+
+        确定性 JSON：base_delay/max_delay/max_retries/time_budget 全部参与——
+        同策略 → 同 key（重试计数可累加的前提）；任一参数变化 → key 变化
+        （计数重新开始）。进程重启后凭 key 从事件流重建计数。
+        """
+        import json
+
+        return json.dumps({
+            "base_delay": self.base_delay,
+            "max_delay": self.max_delay,
+            "max_retries": self.max_retries,
+            "time_budget": self.time_budget,
+        }, sort_keys=True, separators=(",", ":"))
+
 
 class CircuitBreaker:
     """熔断器：连续失败快速失败 + 周期探测恢复。"""
@@ -130,12 +146,62 @@ class RetryResult:
 
 
 class RetryEngine:
-    """智能重试引擎（G6 核心：错误分类 + 退避 + 时间预算 + 熔断）。"""
+    """智能重试引擎（G6 核心：错误分类 + 退避 + 时间预算 + 熔断；v1.26 事件化）。"""
 
-    def __init__(self, policy: Optional[RetryPolicy] = None, breaker: Optional[CircuitBreaker] = None) -> None:
+    def __init__(
+        self,
+        policy: Optional[RetryPolicy] = None,
+        breaker: Optional[CircuitBreaker] = None,
+        *,
+        on_retry_event: Optional[Callable[[object], None]] = None,
+        session_id: str = "",
+        op_id: str = "",
+        provider: str = "",
+        turn: int = 0,
+        step: int = 0,
+    ) -> None:
+        """on_retry_event: 事件回调（v1.26）——收到 Retry/RetryStarted 事件对象。
+
+        默认 None 不产生事件（向后兼容现有调用方）；传入回调后，每次重试调度
+        先回调 Retry（调度决策落盘）、等待开始前回调 RetryStarted——重试计数
+        可从事件流重建（进程重启不丢）。
+        """
         self.policy = policy or RetryPolicy()
         self.breaker = breaker or CircuitBreaker()
         self._history: list[dict] = []
+        self.on_retry_event = on_retry_event
+        self.session_id = session_id
+        self.op_id = op_id
+        self.provider = provider
+        self.turn = turn
+        self.step = step
+
+    def _emit_retry(self, retry: int, retry_id: str, delay_s: float, failure: str, *, started: bool = False) -> None:
+        """产生 Retry / RetryStarted 事件（v1.26，G6 重试状态事件化）。"""
+        if self.on_retry_event is None:
+            return
+        import time as _time
+
+        from ..protocol import Retry, RetryStarted
+
+        ts = _time.time()
+        if started:
+            ev = RetryStarted(
+                id=0, session_id=self.session_id, retry_id=retry_id,
+                turn=self.turn, step=self.step, retry=retry, ts=ts,
+            )
+        else:
+            ev = Retry(
+                id=0, session_id=self.session_id, retry_id=retry_id,
+                turn=self.turn, step=self.step, provider=self.provider,
+                policy_key=self.policy.policy_key(), retry=retry,
+                max_retries=self.policy.max_retries, delay_ms=delay_s * 1000.0,
+                failure=failure[:500], op_id=self.op_id, ts=ts,
+            )
+        try:
+            self.on_retry_event(ev)
+        except Exception:  # noqa: BLE001 —— 事件回调失败不阻断重试主流程
+            pass
 
     def execute(
         self,
@@ -185,10 +251,13 @@ class RetryEngine:
                 # 次数上限
                 if attempts > self.policy.max_retries:
                     break
-                # 退避等待
+                # 退避等待（v1.26 事件化：Retry 调度先落盘 → RetryStarted 等待开始）
                 wait = self.policy.delay_for(attempts - 1, retry_after)
+                retry_id = f"retry-{self.provider or 'default'}-{self.op_id or 'anon'}-{attempts}-{time.time_ns()}"
+                self._emit_retry(attempts, retry_id, wait, str(last_error))
                 if on_retry is not None:
                     on_retry(attempts, wait, last_error)
+                self._emit_retry(attempts, retry_id, wait, str(last_error), started=True)
                 time.sleep(wait)
 
         result = RetryResult(ok=False, error=str(last_error), attempts=attempts, error_class=error_class.value)

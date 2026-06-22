@@ -45,6 +45,16 @@ class EventType(str, Enum):
     WRITE_LOCK_GRANTED = "WriteLockGranted"     # Team Kernel：单写者锁授予
     WRITE_LOCK_RELEASED = "WriteLockReleased"   # Team Kernel：单写者锁释放
     SNAPSHOT_CREATED = "SnapshotCreated"        # 投影层：Verified State 快照创建（可审计）
+    # ---- v1.26 落地新增（DSH 实现层启发：G6/1.4/G13/G14/G19） ----
+    RETRY = "Retry"                             # 重试调度（v1.26，G6）：重试计数可重建（进程重启不丢）
+    RETRY_STARTED = "RetryStarted"              # 重试开始等待（v1.26，G6）：等待前追加
+    CRASH_CLOSER = "CrashCloser"                # 崩溃轮次合成 closer（v1.26，1.4）：TOOL_NOT_STARTED/TOOL_OUTCOME_UNKNOWN + turn/end interrupted
+    GOAL_CHANGE = "GoalChange"                  # 目标域变更（v1.26，G13）：create/edit/pause/resume/complete/block/clear 全生命周期
+    WORKFLOW_START = "WorkflowStart"            # 工作流脚本开始（v1.26，G14）
+    WORKFLOW_PHASE = "WorkflowPhase"            # 工作流阶段进度（v1.26，G14）
+    WORKFLOW_LOG = "WorkflowLog"                # 工作流日志（v1.26，G14）
+    WORKFLOW_END = "WorkflowEnd"                # 工作流结束（v1.26，G14）
+    PERMISSION_PRESET_SELECTED = "PermissionPresetSelected"  # 权限预设选择（v1.26，G19）：组合开关选择事件
 
 
 class Event(BaseModel):
@@ -284,6 +294,134 @@ class SnapshotCreated(Event):
     files: list = Field(default_factory=list, description="文件清单 [{path, sha256, status}]")
 
 
+# ========== v1.26 落地新增事件（DSH 实现层启发：G6/1.4/G13/G14/G19） ==========
+
+
+class Retry(Event):
+    """重试调度（v1.26 落地，G6 重试状态事件化）——重试计数可从日志重建。
+
+    每次重试调度先追加本事件（等待开始前），policyKey 序列化保证"同一策略的计数
+    才能累加"（策略改了计数重新开始）；进程重启后从事件流算出已重试次数不重置为 0。
+    """
+
+    type: Literal[EventType.RETRY] = EventType.RETRY
+    session_id: str
+    retry_id: str = Field(description="重试 id（RetryStarted 引用，同一次重试共享）")
+    turn: int = Field(default=0, description="turn 序号")
+    step: int = Field(default=0, description="step 序号")
+    provider: str = Field(default="", description="provider 标识")
+    policy_key: str = Field(default="", description="policyKey 序列化（mode/initialDelayMs/maxDelayMs/jitterRatio/retryableCodes 排序后 JSON）")
+    retry: int = Field(default=1, description="本次重试序号（从 1 起）")
+    max_retries: int = Field(default=0, description="最大重试次数（normal 模式）")
+    delay_ms: float = Field(default=0.0, description="等待时长（毫秒）")
+    failure: str = Field(default="", description="失败信息摘要（结构化）")
+    op_id: str = Field(default="", description="触发重试的 Op id（幂等追踪）")
+
+
+class RetryStarted(Event):
+    """重试开始等待（v1.26 落地，G6）——真正开始等待前追加。
+
+    与 Retry 成对：Retry = 调度决策，RetryStarted = 等待已开始（可取消等待）。
+    """
+
+    type: Literal[EventType.RETRY_STARTED] = EventType.RETRY_STARTED
+    session_id: str
+    retry_id: str = Field(description="重试 id（与 Retry 事件对应）")
+    turn: int = Field(default=0)
+    step: int = Field(default=0)
+    retry: int = Field(default=1, description="本次重试序号")
+
+
+class CrashCloser(Event):
+    """崩溃轮次合成 closer（v1.26 落地，1.4）——冷恢复时关闭未完成的轮次。
+
+    检测到有 turn/start 无 turn/end 的崩溃轮次 → 追加合成事件关闭：
+    - 无结果的 assistant 调用补 tool/result {TOOL_NOT_STARTED}
+    - 有调用无结果补 TOOL_OUTCOME_UNKNOWN
+    - 再补 step/end + turn/end {reason: interrupted}
+    重放历史仍是合法 transcript；已 flush 事件绝不重写。
+    """
+
+    type: Literal[EventType.CRASH_CLOSER] = EventType.CRASH_CLOSER
+    session_id: str
+    turn: int = Field(description="被关闭的崩溃轮次")
+    closed_steps: list = Field(default_factory=list, description="合成的 step/end 列表 [{step, tool_calls, outcome}]")
+    outcome: Literal["TOOL_NOT_STARTED", "TOOL_OUTCOME_UNKNOWN", "EMPTY"] = Field(description="轮次关闭类型")
+    reason: str = Field(default="interrupted", description="关闭原因")
+
+
+class GoalChange(Event):
+    """目标域变更（v1.26 落地，G13 goal 目标域）——目标全生命周期事件化。
+
+    create/edit 带全量目标快照（last-wins 防增量拼装错误）；clear 带 tombstone
+    （目标被清但不物理删）；恢复从事件流 fold 当前目标 + roundsStarted。
+    """
+
+    type: Literal[EventType.GOAL_CHANGE] = EventType.GOAL_CHANGE
+    session_id: str
+    operation: Literal["create", "edit", "pause", "resume", "complete", "block", "clear"] = Field(description="目标操作")
+    goal: Optional[dict] = Field(default=None, description="全量目标快照 {id, objective, status, revision, createdAt, updatedAt}（clear 时为 None）")
+    cleared_goal_id: str = Field(default="", description="clear tombstone：被清目标 id")
+    rounds_started: int = Field(default=0, description="已开始的续写轮数")
+    revision: int = Field(default=1, description="目标修订号（edit 递增）")
+
+
+class WorkflowStart(Event):
+    """工作流脚本开始（v1.26 落地，G14 workflow 脚本编排）。"""
+
+    type: Literal[EventType.WORKFLOW_START] = EventType.WORKFLOW_START
+    session_id: str
+    workflow_run_id: str = Field(description="工作流运行 id")
+    name: str = Field(default="", description="脚本名（meta.name）")
+    description: str = Field(default="", description="脚本描述")
+    phases: list = Field(default_factory=list, description="phase 声明 [{title, detail?}]")
+
+
+class WorkflowPhase(Event):
+    """工作流阶段进度（v1.26 落地，G14）——UI 观察进度词汇。"""
+
+    type: Literal[EventType.WORKFLOW_PHASE] = EventType.WORKFLOW_PHASE
+    session_id: str
+    workflow_run_id: str
+    phase: str = Field(description="阶段标题")
+    detail: str = Field(default="", description="阶段描述")
+
+
+class WorkflowLog(Event):
+    """工作流日志（v1.26 落地，G14）——脚本执行过程留痕。"""
+
+    type: Literal[EventType.WORKFLOW_LOG] = EventType.WORKFLOW_LOG
+    session_id: str
+    workflow_run_id: str
+    level: str = Field(default="info", description="日志级别（info/warn/error）")
+    message: str = Field(default="", description="日志内容")
+
+
+class WorkflowEnd(Event):
+    """工作流结束（v1.26 落地，G14）——completed/cancelled/error。"""
+
+    type: Literal[EventType.WORKFLOW_END] = EventType.WORKFLOW_END
+    session_id: str
+    workflow_run_id: str
+    stop_reason: Literal["completed", "cancelled", "error"] = Field(description="结束原因")
+    agent_calls: int = Field(default=0, description="全程 agent() 调用次数")
+    error: str = Field(default="", description="失败信息（error 时）")
+
+
+class PermissionPresetSelected(Event):
+    """权限预设选择（v1.26 落地，G19 权限预设组合开关）——选择事件先落日志。
+
+    一个命名预设同时调沙箱模式+审批策略；选择事件保留用户意图（多个预设共享
+    同一组取值时仍可区分）；净变化为零的选择不追加（防事件流噪声）。
+    """
+
+    type: Literal[EventType.PERMISSION_PRESET_SELECTED] = EventType.PERMISSION_PRESET_SELECTED
+    session_id: str
+    preset_name: str = Field(description="选择的预设名（workspace-write/danger-full-access/custom）")
+    sandbox_mode: str = Field(default="", description="生效的沙箱模式")
+    approval_policy: str = Field(default="", description="生效的审批策略")
+
+
 EventUnion = Annotated[
     Union[
         TurnStarted,
@@ -302,6 +440,16 @@ EventUnion = Annotated[
         WriteLockGranted,
         WriteLockReleased,
         SnapshotCreated,
+        # v1.26 新增
+        Retry,
+        RetryStarted,
+        CrashCloser,
+        GoalChange,
+        WorkflowStart,
+        WorkflowPhase,
+        WorkflowLog,
+        WorkflowEnd,
+        PermissionPresetSelected,
     ],
     Field(discriminator="type"),
 ]

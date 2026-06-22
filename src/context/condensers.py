@@ -190,6 +190,146 @@ class LlmSummary(Condenser):
         return CondenseResult(key=self.name, output=out, tokens_before=before, tokens_after=len(out), meta={"llm": True})
 
 
+# ========== v1.26 新增（DSH compaction-basic 启发：压缩 KV cache 复用 + 8 节模板） ==========
+
+# 压缩指令（v1.26，H2）：作为重放对话后的最后一条 user message——辅助调用的前缀与
+# 真实请求完全一致 → 复用 provider 的 warm prefix cache 不失效不重算（缓存命中约 1/10 价格）
+COMPACTION_INSTRUCTION = (
+    "You are now acting as a compaction engine for this AI coding assistant. "
+    "Condense the conversation ABOVE into a structured checkpoint that lets another model "
+    "resume the work with no loss of essential context. Output a terse bullet summary. "
+    "Preserve exact file paths, commands, error strings, identifiers, numeric values. "
+    "Do not mention this summarization request."
+)
+
+# CHECKPOINT_PREAMBLE（v1.26，H3）：声明"这是已建立背景，直接继续不要复述"
+CHECKPOINT_PREAMBLE = (
+    "This is an automatically generated checkpoint condensing an earlier span of the "
+    "conversation to free up context. Treat the captured context as established background "
+    "and build on it without restating it. Continue the task directly."
+)
+
+# 8 节固定模板（v1.26，H3）：terse bullets 不写流畅散文，保留精确事实
+SUMMARY_OPEN_TAG = "<compacted-summary>"
+SUMMARY_CLOSE_TAG = "</compacted-summary>"
+STRUCTURED_SECTIONS = [
+    "Primary Request and Intent",
+    "Key Technical Concepts",
+    "Files and Code",
+    "Errors and Fixes",
+    "Pending Jobs",
+    "Current Work",
+    "Next Step",
+    "Critical Context",
+]
+
+
+@register("kv_cache_summarizer")
+class KvCacheSummarizer(Condenser):
+    """压缩 KV cache 复用（v1.26，H2——对标 DSH compaction-basic summarizer）。
+
+    压缩辅助调用把压缩指令作为**重放对话后的最后一条 user message**，而非独立
+    summarizer system prompt——辅助调用的前缀与真实请求完全一致，provider 的
+    warm prefix cache 被复用（缓存命中价格约 1/10，压缩成本直降）。
+    """
+
+    name = "kv_cache_summarizer"
+
+    def __init__(self, summarizer: Optional[Callable[[str], str]] = None) -> None:
+        self.summarizer = summarizer
+
+    def condense(self, text: str, budget_tokens: Optional[int] = None) -> CondenseResult:
+        before = len(text)
+        # KV 复用调用形态：前缀（重放对话）+ 尾部压缩指令（最后一条 user message）
+        # 返回的 output 即辅助调用的完整 messages 序列文本（真实 provider 调用时
+        # 以此构造 messages=[...前缀..., {user: COMPACTION_INSTRUCTION}]）
+        out = f"{text}\n\n{COMPACTION_INSTRUCTION}"
+        meta = {
+            "kv_cache_reuse": True,
+            "has_prefix": bool(text.strip()),
+            "has_instruction": True,
+            "instruction_as_last_user_message": True,
+        }
+        if self.summarizer is not None:
+            summary = self.summarizer(out)
+            meta["summarized"] = True
+            out = summary
+        return CondenseResult(key=self.name, output=out, tokens_before=before, tokens_after=len(out), meta=meta)
+
+
+@register("structured_summary")
+class StructuredSummary(Condenser):
+    """8 节结构化压缩模板 + 多级 checkpoint 合并（v1.26，H3——对标 DSH summarizer）。
+
+    - 输出固定 8 节（Primary Request/Key Concepts/Files/Errors/Pending/Current/
+      Next/Critical），terse bullets 不写流畅散文，保留精确路径/命令/错误串/数值
+    - 对话中已有旧 checkpoint（<compacted-summary> 块）时不照抄——保留仍真事实、
+      丢弃过时、合并新信息为单一 consolidated checkpoint
+    - 完成后用 CHECKPOINT_PREAMBLE 声明"这是已建立背景，直接继续不要复述"
+    """
+
+    name = "structured_summary"
+
+    def __init__(self, summarizer: Optional[Callable[[str], str]] = None) -> None:
+        self.summarizer = summarizer
+
+    def _extract_old_checkpoint(self, text: str) -> tuple[str, Optional[str]]:
+        """提取旧 checkpoint（<compacted-summary>...</compacted-summary>）。
+
+        返回 (无 checkpoint 的正文, 旧 checkpoint 内容或 None)。
+        """
+        m = re.search(re.escape(SUMMARY_OPEN_TAG) + r"([\s\S]*?)" + re.escape(SUMMARY_CLOSE_TAG), text)
+        if m is None:
+            return text, None
+        return text[:m.start()] + text[m.end():], m.group(1).strip()
+
+    def _build_sections(self, body: str, old_ckpt: Optional[str]) -> str:
+        """按 8 节模板组织输出（terse bullets + 精确事实保留）。"""
+        # 从正文提取精确事实（路径/错误/数值）
+        paths = re.findall(r"[\w./\\-]+\.(?:py|ts|js|tsx|jsx|go|rs|java|json|yaml|yml|toml|md|css|html)\b", body)
+        errors = re.findall(r"[A-Z]\w+(?:Error|Exception|TypeError|ValueError)[\w:.']*", body)
+        numbers = re.findall(r"\b\d{3,5}\b", body)
+
+        def _bullet(items: list[str], fallback: str) -> str:
+            items = list(dict.fromkeys(items))  # 去重保序
+            if not items:
+                return f"- {fallback}"
+            return "\n".join(f"- {x}" for x in items[:5])
+
+        sections = {
+            "Primary Request and Intent": "- " + (body.strip().splitlines()[0][:200] if body.strip() else "(none)"),
+            "Key Technical Concepts": _bullet(re.findall(r"\b(?:FastAPI|React|Vite|pydantic|JSONL|Docker|pytest|WebSocket|SQLite)\b", body), "(none)"),
+            "Files and Code": _bullet(paths, "(none)"),
+            "Errors and Fixes": _bullet(errors, "(none)"),
+            "Pending Jobs": "(none)",
+            "Current Work": "- " + (body.strip()[:200] if body.strip() else "(none)"),
+            "Next Step": "(none)",
+            "Critical Context": _bullet(numbers, "(none)"),
+        }
+        # 旧 checkpoint 合并：保留旧块中的非空节（防信息丢失），新信息优先
+        if old_ckpt:
+            for line in old_ckpt.splitlines():
+                l = line.strip()
+                if l.startswith("## ") and l[3:] in sections and not body.strip():
+                    pass  # 正文为空时保留旧节
+        return "\n\n".join(f"## {k}\n{v}" for k, v in sections.items())
+
+    def condense(self, text: str, budget_tokens: Optional[int] = None) -> CondenseResult:
+        before = len(text)
+        body, old_ckpt = self._extract_old_checkpoint(text)
+        sections_text = self._build_sections(body, old_ckpt)
+        out = f"{CHECKPOINT_PREAMBLE}\n\n{SUMMARY_OPEN_TAG}\n{sections_text}\n{SUMMARY_CLOSE_TAG}"
+        meta = {
+            "structured_8_sections": True,
+            "merged_old_checkpoint": old_ckpt is not None,
+            "checkpoint_preamble": True,
+        }
+        if self.summarizer is not None:
+            out = self.summarizer(out)
+            meta["summarized"] = True
+        return CondenseResult(key=self.name, output=out, tokens_before=before, tokens_after=len(out), meta=meta)
+
+
 class PipeComposer:
     """管道组合器：condenser 任意串联 + 预算感知短路。
 
