@@ -56,6 +56,35 @@ class ModelRouter:
         role = "architect" if mode == "plan" else "editor"
         return RoutingDecision(role=role, model=self._pick_model(role), reason=f"mode={mode} → role={role}")
 
+    def route_role(self, role: str) -> RoutingDecision:
+        """按角色直接路由（v1.27 新增：vision 子代理等自定义角色）。
+
+        设计（能力接缝 G16）：architect/editor 之外的角色（如 vision）由
+        调用方显式指定——模型 schema 恒定，只换实现层 provider。
+        """
+        model = self._pick_model(role)
+        return RoutingDecision(role=role, model=model, reason=f"explicit role={role} → model={model}")
+
+    def generate_role(self, messages: list[dict], *, role: str) -> str:
+        """按指定角色调用 Provider（v1.27 新增：视觉子代理走 vision 角色）。
+
+        与 generate() 的差异：角色由调用方显式给出（ReadImage 工具/Subagent
+        委派），不经过 mode → role 映射——vision 模型不被 Plan/Act 主链路影响。
+        """
+        role_models = sorted(
+            [m for m in self.models if m.role == role],
+            key=lambda m: m.priority,
+        )
+        last_error: Optional[Exception] = None
+        for spec in role_models:
+            for model_name in [spec.name] + spec.fallback:
+                try:
+                    return self.provider.generate(messages, role=role, model=model_name)
+                except ProviderError as e:
+                    last_error = e
+                    continue
+        raise ProviderError(f"角色 {role} 全部模型降级失败: {last_error}")
+
     def generate(self, messages: list[dict], *, mode: str = "act") -> str:
         """按模式路由并调用 Provider（带同角色降级）。"""
         decision = self.route(mode)

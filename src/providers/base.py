@@ -37,6 +37,7 @@ class ProviderConfig:
     default_model: str
     keys: list[str] = field(default_factory=list)
     timeout: float = 120.0
+    max_tokens: int = 4096  # 推理模型思考空间（v1.27 新增，默认给足）
 
     @property
     def active_key(self) -> str:
@@ -81,7 +82,14 @@ class BaseProvider(ABC):
 
 
 class OpenAICompatProvider(BaseProvider):
-    """OpenAI 兼容 Provider（讯飞 / opencode.ai / 本地 Ollama 通用）。"""
+    """OpenAI 兼容 Provider（讯飞 / opencode.ai / 本地 Ollama 通用）。
+
+    v1.27 增强（视觉子代理接入）：
+    - 推理模型兜底：content 为 null 时回退 reasoning_content（MiMo-V2.5 等
+      reasoning 模型先思考后作答，token 预算不足时 content 可能为空）
+    - 多模态消息透传：messages 含 image_url 时原样透传（视觉子代理读图，
+      无需主模型有视觉能力）
+    """
 
     def chat(self, messages: list[dict], *, model: Optional[str] = None, temperature: float = 0.2) -> str:
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -89,6 +97,8 @@ class OpenAICompatProvider(BaseProvider):
             "model": model or self.config.default_model,
             "messages": messages,
             "temperature": temperature,
+            # 推理模型需要思考空间，max_tokens 显式给足（MoE 推理模型思考 token 占比高）
+            "max_tokens": self.config.max_tokens,
         }
         try:
             resp = self._client.post(url, headers={"Authorization": f"Bearer {self.config.active_key}"}, json=payload)
@@ -102,9 +112,49 @@ class OpenAICompatProvider(BaseProvider):
             raise ProviderError(f"HTTP {resp.status_code}: {resp.text[:300]}")
         try:
             data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            msg = data["choices"][0]["message"]
+            content = msg.get("content")
+            if content is None or content == "":
+                # 推理模型兜底：content 空时取 reasoning_content（思考过程也算有效输出）
+                content = msg.get("reasoning_content")
+            return (content or "").strip()
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise ProviderError(f"响应解析失败: {e}") from e
+
+
+def provider_from_credentials(
+    credential_key: str,
+    *,
+    name: str,
+    base_url: str,
+    default_model: str,
+    max_tokens: int = 4096,
+) -> "OpenAICompatProvider":
+    """从凭据通道构造 Provider（G16③ 凭据独立通道，v1.27 新增）。
+
+    - API key 从 ~/.codemason/credentials.yaml 读取（{{credential:section.key}}），
+      代码/事件流不存明文
+    - 视觉子代理接入：MiMo-V2.5 等视觉模型直接走 OpenAI 兼容端点
+
+    用法：
+        p = provider_from_credentials("api_keys.mimo",
+            name="mimo", base_url="https://opencode.ai/zen/go/v1", default_model="mimo-v2.5")
+    """
+    from ..security.credentials import CredentialStore
+
+    store = CredentialStore()
+    key = store.get(credential_key)
+    if not key:
+        raise ProviderError(f"凭据缺失: {credential_key}（请写入 ~/.codemason/credentials.yaml）")
+    return OpenAICompatProvider(
+        ProviderConfig(
+            name=name,
+            base_url=base_url,
+            api_key=key,
+            default_model=default_model,
+            max_tokens=max_tokens,
+        )
+    )
 
 
 class MockProvider(BaseProvider):

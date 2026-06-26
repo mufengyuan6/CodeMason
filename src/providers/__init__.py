@@ -7,6 +7,7 @@ from .base import (
     ProviderConfig,
     ProviderError,
     ProviderRateLimited,
+    provider_from_credentials,
 )
 from .resume import JsonlHalfLineRecovery, RecoveryMode, StreamRecoveryPolicy, StreamStatus
 from .retry import CircuitBreaker, ErrorClass, RetryEngine, RetryPolicy, RetryResult
@@ -18,6 +19,7 @@ __all__ = [
     "ProviderConfig",
     "ProviderError",
     "ProviderRateLimited",
+    "provider_from_credentials",
     "RetryEngine",
     "RetryPolicy",
     "RetryResult",
