@@ -68,9 +68,15 @@ class ModelRouter:
     def generate_role(self, messages: list[dict], *, role: str) -> str:
         """按指定角色调用 Provider（v1.27 新增：视觉子代理走 vision 角色）。
 
-        与 generate() 的差异：角色由调用方显式给出（ReadImage 工具/Subagent
-        委派），不经过 mode → role 映射——vision 模型不被 Plan/Act 主链路影响。
+        与 generate() 的差异：
+        - 角色由调用方显式给出（ReadImage 工具/Subagent 委派），不经过 mode → role 映射
+        - vision 角色绑定独立 provider（_vision_provider，MiMo 实例）——
+          主链路 DeepSeek 不承载视觉，故障域隔离；其余角色走主 provider
         """
+        # vision 角色 → 独立视觉 provider（MiMo）；否则主 provider
+        provider = getattr(self, "_vision_provider", None) if role == "vision" else self.provider
+        if provider is None:
+            provider = self.provider
         role_models = sorted(
             [m for m in self.models if m.role == role],
             key=lambda m: m.priority,
@@ -79,7 +85,7 @@ class ModelRouter:
         for spec in role_models:
             for model_name in [spec.name] + spec.fallback:
                 try:
-                    return self.provider.generate(messages, role=role, model=model_name)
+                    return provider.generate(messages, role=role, model=model_name)
                 except ProviderError as e:
                     last_error = e
                     continue
@@ -113,3 +119,53 @@ class ModelRouter:
 
     def get_routing_stats(self) -> dict:
         return {"models": [{"name": m.name, "role": m.role, "priority": m.priority} for m in self.models]}
+
+
+# ---------- 双 provider 工厂（v1.27） ----------
+
+DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+MIMO_BASE_URL = "https://opencode.ai/zen/go/v1"
+MIMO_VISION_MODEL = "mimo-v2.5"
+
+
+def build_router_from_credentials() -> ModelRouter:
+    """从凭据通道构建生产路由（v1.27 新增：主链路 DeepSeek + 视觉 MiMo）。
+
+    架构（用户裁决，2026-08-16）：
+    - architect/editor（主链路）→ DeepSeek（opencode.ai 中转，同一 key）
+    - vision（视觉子代理）→ MiMo-V2.5（原生全模态，仅视觉）
+    - 两 provider 独立：主链路崩了 vision 照常，反之亦然（故障域隔离）
+
+    凭据：~/.codemason/credentials.yaml 的 api_keys.deepseek / api_keys.mimo
+    （G16③ 凭据独立通道：key 不进代码/事件流，只存引用）
+    """
+    from ..providers import OpenAICompatProvider, ProviderConfig, provider_from_credentials
+
+    # 主链路 provider（DeepSeek）——architect/editor 双角色共用
+    main_provider = provider_from_credentials(
+        "api_keys.deepseek",
+        name="deepseek",
+        base_url=DEEPSEEK_BASE_URL,
+        default_model=DEEPSEEK_MODEL,
+    )
+    # 视觉 provider（MiMo）——独立实例，故障域隔离
+    vision_provider = provider_from_credentials(
+        "api_keys.mimo",
+        name="mimo",
+        base_url=MIMO_BASE_URL,
+        default_model=MIMO_VISION_MODEL,
+    )
+
+    # 主链路：单 provider 实例承载 architect/editor（模型名相同，降级链共享）
+    router = ModelRouter(
+        provider=main_provider,
+        models=[
+            ModelSpec(name=DEEPSEEK_MODEL, role="architect", priority=1),
+            ModelSpec(name=DEEPSEEK_MODEL, role="editor", priority=1),
+            ModelSpec(name=MIMO_VISION_MODEL, role="vision", priority=1),
+        ],
+    )
+    # vision 角色绑定独立 provider（不进主链路的 self.provider）
+    router._vision_provider = vision_provider
+    return router

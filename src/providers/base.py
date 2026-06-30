@@ -51,6 +51,7 @@ class BaseProvider(ABC):
         self.config = config
         self._client = httpx.Client(timeout=config.timeout)
         self._retry_backoff = [30, 60, 120]  # 指数退避冷却（秒）
+        self.calls: list[dict] = []  # 调用台账（成本归因/审计；v1.27 修复：真实 Provider 缺 calls 会崩）
 
     @abstractmethod
     def chat(self, messages: list[dict], *, model: Optional[str] = None, temperature: float = 0.2) -> str:

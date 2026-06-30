@@ -185,6 +185,57 @@ class TestProviderFromCredentials:
         assert p.config.max_tokens >= 4096
 
 
+# ---------- 双 provider 工厂（主链路 DeepSeek + 视觉 MiMo） ----------
+
+
+class TestDualProviderRouter:
+    def test_build_router_from_credentials(self, monkeypatch):
+        """生产工厂：主链路 DeepSeek + vision MiMo，两 provider 独立实例。"""
+        from src.routing.router import (
+            DEEPSEEK_MODEL,
+            MIMO_VISION_MODEL,
+            ModelRouter,
+            build_router_from_credentials,
+        )
+
+        class _Store:
+            def get(self, key):
+                return "sk-test-key-1234567890abcdef"
+
+        monkeypatch.setattr("src.security.credentials.CredentialStore", _Store)
+        router = build_router_from_credentials()
+        assert isinstance(router, ModelRouter)
+        # 主链路双角色都是 DeepSeek
+        assert router.route("plan").model == DEEPSEEK_MODEL
+        assert router.route("act").model == DEEPSEEK_MODEL
+        # vision 角色是 MiMo
+        assert router.route_role("vision").model == MIMO_VISION_MODEL
+        # 视觉 provider 独立实例（非主链路 provider）
+        assert router._vision_provider is not router.provider
+        assert router._vision_provider.config.default_model == MIMO_VISION_MODEL
+        assert router.provider.config.default_model == DEEPSEEK_MODEL
+
+    def test_generate_role_vision_uses_vision_provider(self, monkeypatch):
+        """vision 角色调用打到独立 MiMo provider，主链路不受影响。"""
+        from src.routing.router import ModelRouter, ModelSpec
+
+        class _VisionProvider:
+            calls = []
+
+            def generate(self, messages, *, role, model):
+                self.calls.append({"role": role, "model": model})
+                return "视觉结果"
+
+        router = ModelRouter(
+            provider=MockProvider(reply="主链路回复"),
+            models=[ModelSpec(name="mimo-v2.5", role="vision", priority=1)],
+        )
+        router._vision_provider = _VisionProvider()
+        out = router.generate_role([{"role": "user", "content": "看图"}], role="vision")
+        assert out == "视觉结果"
+        assert router._vision_provider.calls[-1]["model"] == "mimo-v2.5"
+
+
 # ---------- OpenAICompatProvider 推理模型兜底 ----------
 
 
