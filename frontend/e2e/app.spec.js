@@ -318,4 +318,29 @@ test.describe('v1.23 新增视图', () => {
     expect(res4.status()).toBe(200)
     expect((await res4.json()).enabled).toBe(true)
   })
+
+  test('v1.27 视觉面板抽屉：打开渲染，空态可见', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.getByTestId('landing-root')).toBeVisible()
+    await page.getByTestId('nav').getByText('Start').click()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+
+    await page.getByTestId('drawer-vision').click()
+    const panel = page.getByTestId('vision-panel')
+    await expect(panel).toBeVisible()
+    // 空态（事件流暂无 ReadImage/Ocr 工具结果）——Agent Skills 兼容零开销
+    await expect(panel).toContainText(/视觉执行|暂无视觉工具/)
+    await page.getByTestId('drawer-vision').click()
+    await expect(page.getByTestId('drawer-panel')).not.toBeVisible()
+  })
+
+  test('v1.27 Skill registry API：索引可查询（空目录安全降级）', async ({ request }) => {
+    const token = 'demo-token'
+    const res = await request.get('http://127.0.0.1:29864/api/skills', { headers: { 'x-agent-token': token } })
+    expect(res.status()).toBe(200)
+    const body = await res.json()
+    expect(body.enabled).toBe(true)
+    expect(Array.isArray(body.skills)).toBe(true)
+    expect(body.stats).toBeTruthy()
+  })
 })

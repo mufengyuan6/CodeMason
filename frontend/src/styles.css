@@ -648,3 +648,22 @@ body {
 .btn-danger:hover { background: var(--c-danger); color: #fff; }
 .approval-edit { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .edit-input { flex: 1; min-width: 200px; background: var(--c-surface-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm); color: var(--c-text); padding: var(--space-2); font-family: var(--font-mono, monospace); font-size: var(--fs-sm); }
+
+/* ===== 视觉执行面板（v1.27）===== */
+.vision-entry { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: var(--space-4); margin-bottom: var(--space-3); }
+.vision-entry.vision-error { border-color: var(--c-danger); }
+.vision-head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); flex-wrap: wrap; }
+.vision-tool { font-weight: 600; font-size: var(--fs-sm); color: var(--c-primary-soft); }
+.vision-path { font-family: var(--font-mono, monospace); font-size: var(--fs-xs); color: var(--c-text-dim); word-break: break-all; }
+.vision-status { font-size: var(--fs-xs); padding: 2px 8px; border-radius: var(--radius-sm); }
+.vision-ok .vision-status { background: rgba(52, 211, 153, 0.12); color: var(--c-success); }
+.vision-error .vision-status { background: rgba(248, 113, 113, 0.12); color: var(--c-danger); }
+.vision-unknown .vision-status { background: rgba(148, 163, 184, 0.12); color: var(--c-text-dim); }
+.vision-desc { font-size: var(--fs-sm); color: var(--c-text); margin-bottom: var(--space-2); line-height: 1.6; }
+.vision-ocr { background: var(--c-surface-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm); padding: var(--space-3); margin-bottom: var(--space-2); }
+.vision-ocr-label { font-size: var(--fs-xs); color: var(--c-text-dim); margin-bottom: var(--space-2); }
+.vision-ocr-text { font-family: var(--font-mono, monospace); font-size: var(--fs-sm); color: var(--c-text); white-space: pre-wrap; word-break: break-all; margin: 0; }
+.vision-blocks { display: flex; flex-direction: column; gap: var(--space-1); }
+.vision-block-row { display: flex; align-items: center; justify-content: space-between; font-size: var(--fs-sm); padding: var(--space-1) var(--space-2); background: var(--c-surface-2); border-radius: var(--radius-sm); }
+.vision-block-text { color: var(--c-text); }
+.vision-block-conf { font-size: var(--fs-xs); color: var(--c-text-dim); }

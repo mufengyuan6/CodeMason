@@ -11,6 +11,7 @@ import ContextPanel from './ContextPanel.jsx'
 import HealthSignals from './HealthSignals.jsx'
 import ContributionPanel from './ContributionPanel.jsx'
 import ApprovalInboxPanel from './ApprovalInboxPanel.jsx'
+import VisionPanel from './VisionPanel.jsx'
 
 const HEALTH_POLL_MS = 15000
 
@@ -224,6 +225,7 @@ export default function Cockpit({ onBack }) {
               { id: 'health', label: '健康', icon: '💓' },
               { id: 'contribution', label: '贡献', icon: '📜' },
               { id: 'inbox', label: '收件箱', icon: '📥' },
+              { id: 'vision', label: '视觉', icon: '👁' },
             ].map((m) => (
               <button
                 key={m.id}
@@ -248,6 +250,7 @@ export default function Cockpit({ onBack }) {
               {drawerView === 'health' && <HealthSignals />}
               {drawerView === 'contribution' && <ContributionPanel />}
               {drawerView === 'inbox' && <ApprovalInboxPanel />}
+              {drawerView === 'vision' && <VisionPanel events={events} />}
             </div>
           )}
         </aside>

@@ -411,6 +411,42 @@ async def scheduler_view():
     return {"enabled": True, "rules": _loop_scheduler.rules(), "history": _loop_scheduler.history(limit=20)}
 
 
+# ========== Skill 生态对接（v1.27） ==========
+
+_skill_registry = None  # 由 setup 挂载（懒初始化）
+
+
+def _get_skill_registry():
+    """懒初始化 Skill registry（本地盘点索引，复用 LazySkillLoader 发现层）。"""
+    global _skill_registry
+    if _skill_registry is None:
+        from pathlib import Path as _P
+
+        from ..skills.registry import SkillRegistry
+
+        # 项目内 skills 目录（不存在则用默认路径，scan 空目录安全）
+        skills_dir = _P(__file__).resolve().parents[2] / "skills"
+        _skill_registry = SkillRegistry(skills_dir)
+        _skill_registry.rebuild_index()
+    return _skill_registry
+
+
+@app.get("/api/skills", dependencies=[Depends(require_auth)])
+async def skills_view(q: str = ""):
+    """Skill 本地盘点索引（v1.27：scan → index → search，对接 Agent Skills 标准）。"""
+    registry = _get_skill_registry()
+    if q:
+        return {"enabled": True, "query": q, "skills": registry.search(q), "stats": registry.stats()}
+    return {"enabled": True, "skills": registry.list_all(), "stats": registry.stats()}
+
+
+@app.get("/api/skills/health", dependencies=[Depends(require_auth)])
+async def skills_health():
+    """Skill registry 健康信号（索引路径/条目数）。"""
+    registry = _get_skill_registry()
+    return {"enabled": True, **registry.stats()}
+
+
 # ========== WebSocket（核心） ==========
 
 async def _broadcast(event_obj) -> None:
