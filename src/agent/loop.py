@@ -109,6 +109,9 @@ class AgentLoop:
         self._op_router = None       # OpRouter：按工具名分派档位（成本归因）
         self._policy_engine = None   # PolicyEngine：工具执行前策略判定
         self._last_policy_reason = ""
+        # v1.28 G20 诊断回喂（可注入，None = 关闭）：失败后下一轮修复自动注入溯源诊断
+        self._root_cause_analyzer = None    # RootCauseAnalyzer：失败 → 溯源报告 + 诊断载荷
+        self._pending_diagnostic: Optional[dict] = None  # 待注入下一轮修复的诊断信号
 
     def set_scheduler(self, scheduler: object) -> None:
         """注入 LoopScheduler（调度触发接入）。"""
@@ -125,6 +128,14 @@ class AgentLoop:
     def set_policy_engine(self, policy_engine: object) -> None:
         """注入 PolicyEngine（策略即代码：工具执行前 deny/require_approval 判定）。"""
         self._policy_engine = policy_engine
+
+    def set_root_cause_analyzer(self, analyzer: object) -> None:
+        """注入 RootCauseAnalyzer（v1.28 G20）：失败 → 溯源报告 → 诊断回喂。
+
+        接线后：Error 事件发生时自动触发溯源，报告注入下一轮修复上下文
+        （CodeTracer 反思回放思想——"正确时机提供诊断信号远比多给重试机会有价值"）。
+        """
+        self._root_cause_analyzer = analyzer
 
     # ---------- Op 入口 ----------
 
@@ -261,10 +272,21 @@ class AgentLoop:
     # ---------- 阶段实现（Phase 1 可跑通的最小闭环） ----------
 
     def _do_planning(self) -> Optional[Event]:
-        """规划阶段：LLM 产出计划（Phase 1 简化：单步计划）。"""
+        """规划阶段：LLM 产出计划（Phase 1 简化：单步计划）。
+
+        v1.28 G20 诊断回喂：上一轮失败产出的溯源诊断注入本轮规划上下文
+        （CodeTracer 反思回放——正确时机提供诊断信号远比多给重试机会有价值）。
+        """
         if self.llm is not None:
+            # 诊断回喂注入（有失败诊断 + 有 LLM 时才注入）
+            plan_content = f"[PLAN] 会话:{self.session_id} turn:{self._turn_index}"
+            if self._pending_diagnostic:
+                frag = self._pending_diagnostic.get("prompt_fragment", "")
+                if frag:
+                    plan_content = f"{plan_content}\n{self._pending_diagnostic.get('trigger', 'diagnostic')}\n{frag}"
+                self._pending_diagnostic = None  # 注入一次即消费
             plan = self.llm.generate(
-                [{"role": "user", "content": f"[PLAN] 会话:{self.session_id} turn:{self._turn_index}"}],
+                [{"role": "user", "content": plan_content}],
                 role="architect",
             )
             self._emit_message(plan)
@@ -462,9 +484,22 @@ class AgentLoop:
                 session_id=self.session_id,
                 message=str(ev.content),
                 error_type=ev.meta.get("error_type", "unknown"),
+                failure_stage=ev.meta.get("failure_stage"),   # v1.28：TRAJEVAL 三阶段口径
+                related_tool=ev.meta.get("related_tool"),     # v1.28：溯源过滤
                 ts=time.time(),
             )
             self.event_log.append(err)
+            # v1.28 G20 诊断回喂：失败 → 溯源报告 → 注入下一轮修复（CodeTracer 反思回放）
+            if self._root_cause_analyzer is not None:
+                try:
+                    _, feed = self._root_cause_analyzer.analyze(
+                        trigger="error",
+                        trigger_event_id=err.id,
+                        session_id=self.session_id,
+                    )
+                    self._pending_diagnostic = feed
+                except Exception:
+                    self._pending_diagnostic = None  # 溯源失败不阻断主流程
             self.state_machine.transition(AgentState.ERROR)
             self.state_machine.termination_reason = TerminationReason.EXCEPTION
 

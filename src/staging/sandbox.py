@@ -36,12 +36,69 @@ class StagedChange:
 
 
 class StagingSandbox:
-    """Staging 沙盒：变更暂存 + Hook 验证 + apply（含 attestation 完整性校验）。"""
+    """Staging 沙盒：变更暂存 + Hook 验证 + apply（含 attestation 完整性校验）。
+
+    v1.28（G20）：Hook 失败产出 FixPacket 机读契约（last_fix_packet），
+    供根因分析消费——"失败 → 解释 → 修复"闭环（FixPacket 从半实现变为溯源消费端）。
+    """
 
     def __init__(self, hooks: Optional[list[Callable[[StagedChange], dict]]] = None) -> None:
         self._changes: dict[str, StagedChange] = {}
         self._hooks = hooks or []
         self._seq = 0
+        self._last_fix_packet: Optional[dict] = None  # v1.28：最近一次 Hook 失败的 FixPacket
+
+    @property
+    def last_fix_packet(self) -> Optional[dict]:
+        """最近一次 Hook 失败产出的 FixPacket（G20 溯源消费端）。"""
+        return self._last_fix_packet
+
+    def _emit_fix_packet(self, change: StagedChange) -> None:
+        """Hook 失败 → FixPacket 机读契约（file+line+hint+修复指令）。
+
+        消费方：RootCauseAnalyzer（G20 ①确定性证据链 FixPacket 契约 + ③修复指令）。
+        """
+        from ..verify.fix_packet import FixPacketBuilder, Violation
+
+        builder = FixPacketBuilder()
+        violations = []
+        instructions = []
+        for r in change.hook_results:
+            if r.get("blocked"):
+                hook_name = r.get("hook", "hook")
+                reason = r.get("reason", "")
+                if isinstance(reason, dict):
+                    # YAGNI 报告：拆出 findings 为 violation
+                    findings = reason.get("findings", [])
+                    for f in findings:
+                        violations.append(
+                            Violation(
+                                code=f.get("rule", "YAGNI"),
+                                file=f.get("file", change.path),
+                                line=f.get("line", 0),
+                                message=f.get("message", ""),
+                                hint=f.get("message", ""),
+                                severity="block" if f.get("severity") == "block" else "warning",
+                            )
+                        )
+                    instructions.append(f"[{hook_name}] {reason}")
+                else:
+                    violations.append(
+                        Violation(
+                            code="HOOK_FAIL", file=change.path,
+                            message=str(reason)[:200], hint=str(reason)[:200],
+                        )
+                    )
+                    instructions.append(f"[{hook_name}] {str(reason)[:200]}")
+        packet = builder.build(
+            stage="staging_apply",
+            violations=violations or [Violation(code="HOOK_FAIL", file=change.path, message="Hook 验证失败")],
+            instructions=instructions,
+            verification_commands=[],
+            constraints={"allowed_scope": [change.path]},
+            status="failed",
+        )
+        self._last_fix_packet = packet.to_dict()
 
     @staticmethod
     def _sha256(change: StagedChange) -> str:
@@ -69,7 +126,7 @@ class StagingSandbox:
         )
 
     def run_hooks(self, change: StagedChange) -> bool:
-        """运行全部 Hook 验证。任一 Hook 返回 blocked=True 则拦截。"""
+        """运行全部 Hook 验证。任一 Hook 返回 blocked=True 则拦截（v1.28：拦截产出 FixPacket）。"""
         change.hook_results = []
         passed = True
         for hook in self._hooks:
@@ -82,6 +139,8 @@ class StagingSandbox:
                 change.hook_results.append({"hook": getattr(hook, "__name__", "?"), "blocked": True, "reason": str(e)})
                 passed = False
         change.status = "pending" if passed else "blocked"
+        if not passed:
+            self._emit_fix_packet(change)  # G20：失败即产出机读契约
         return passed
 
     def verify_attestation(self, change: StagedChange) -> bool:

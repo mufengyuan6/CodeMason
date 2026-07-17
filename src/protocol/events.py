@@ -55,6 +55,8 @@ class EventType(str, Enum):
     WORKFLOW_LOG = "WorkflowLog"                # 工作流日志（v1.26，G14）
     WORKFLOW_END = "WorkflowEnd"                # 工作流结束（v1.26，G14）
     PERMISSION_PRESET_SELECTED = "PermissionPresetSelected"  # 权限预设选择（v1.26，G19）：组合开关选择事件
+    # ---- v1.28 落地新增（G20 事件驱动根因分析） ----
+    ROOT_CAUSE_REPORT = "RootCauseReport"       # 溯源报告（G20 ⑤沉淀）：溯源即事件，可审计可回放
 
 
 class Event(BaseModel):
@@ -99,6 +101,8 @@ class ExecApprovalRequest(Event):
     command: str = Field(default="", description="待执行的 shell 命令（Bash 工具）")
     risk_level: Literal["red", "yellow", "green"] = Field(default="red", description="风险等级（红/黄/绿）")
     diff_preview: Optional[str] = Field(default=None, description="写入类操作的 diff 预览（审批中心展示）")
+    rationale: Optional[str] = Field(default=None, description="v1.29：模型自述理由（为什么选这个工具，≤20 词）")
+    rationale_source: str = Field(default="model_self_report", description="v1.29：rationale 来源标注——模型自述理由，非验证事实（对标 fact-checker 声明态）")
 
 
 class ItemCompleted(Event):
@@ -110,6 +114,8 @@ class ItemCompleted(Event):
     item_id: str
     content: Optional[Any] = Field(default=None, description="结构化结果")
     metrics: Optional[dict] = Field(default=None, description="YAGNI 四维量化指标（可选）")
+    rationale: Optional[str] = Field(default=None, description="v1.29：模型自述理由（为什么选这个工具，≤20 词，仅 tool_result）")
+    rationale_source: str = Field(default="model_self_report", description="v1.29：rationale 来源标注——模型自述理由，非验证事实")
 
 
 class TurnCancelled(Event):
@@ -121,12 +127,18 @@ class TurnCancelled(Event):
 
 
 class Error(Event):
-    """内核错误（不中断会话，仅上报）。"""
+    """内核错误（不中断会话，仅上报）。
+
+    v1.28 增强（G20 事件驱动根因分析）：补 failure_stage（TRAJEVAL 三阶段口径——
+    search/read/edit/verify，溯源定位的依据）+ related_tool（失败关联工具，溯源过滤用）。
+    """
 
     type: Literal[EventType.ERROR] = EventType.ERROR
     session_id: str
     message: str
     error_type: str = Field(default="unknown", description="错误分类（语法/权限/路径/逻辑/网络）")
+    failure_stage: Optional[str] = Field(default=None, description="v1.28：失败阶段定位（search/read/edit/verify，TRAJEVAL 口径）")
+    related_tool: Optional[str] = Field(default=None, description="v1.28：失败关联的工具名（溯源证据链过滤）")
 
 
 class Rollback(Event):
@@ -422,6 +434,36 @@ class PermissionPresetSelected(Event):
     approval_policy: str = Field(default="", description="生效的审批策略")
 
 
+# ========== v1.28 落地新增事件（G20 事件驱动根因分析） ==========
+
+
+class RootCauseReport(Event):
+    """溯源报告（v1.28 落地，G20 ⑤沉淀）——溯源即事件，可审计可回放。
+
+    失败/疑问触发根因分析后，完整的溯源报告作为本事件进 EventLog：
+    - 确定性证据链（图谱 BFS 影响面 + 事件流失败链 + FixPacket 机读契约 + YAGNI 外环）
+    - LLM 归因假设（attributions，全部 agent_inferred 永不自动升级）
+    - 溯源报告（search/read/edit 三阶段定位 + 证据集 + 修复指令，机读可消费）
+    - 诊断回喂（report_id 供下一轮修复注入引用）
+    """
+
+    type: Literal[EventType.ROOT_CAUSE_REPORT] = EventType.ROOT_CAUSE_REPORT
+    session_id: str
+    report_id: str = Field(description="溯源报告 id（诊断回喂引用）")
+    trigger: Literal["verify_failed", "error", "user_query"] = Field(description="触发源：验证失败/错误事件/用户'为什么挂'")
+    trigger_event_id: int = Field(default=0, description="触发源事件 id（失败链回溯锚点）")
+    status: Literal["completed", "degraded"] = Field(default="completed", description="completed=完整链路 / degraded=LLM 降级仅确定性证据链")
+    # ① 确定性证据链
+    evidence: dict = Field(default_factory=dict, description="确定性证据链 {call_chain: [...], failure_chain: [...], yagni_findings: [...], fix_packets: [...]}")
+    # ② LLM 归因假设
+    attributions: list = Field(default_factory=list, description="归因假设 [{hypothesis, confidence, evidence_ref, agent_inferred}]——永不自动升级")
+    # ③ 溯源报告
+    stages: list = Field(default_factory=list, description="TRAJEVAL 三阶段定位 [{stage: search/read/edit, file, line, issue, confidence}]")
+    fix_instructions: list = Field(default_factory=list, description="修复指令（FixPacket 消费闭环：机读可消费）")
+    # ④ 诊断回喂
+    feed_forward: Optional[dict] = Field(default=None, description="诊断回喂载荷 {injected_turn, injected_step, prompt_fragment}")
+
+
 EventUnion = Annotated[
     Union[
         TurnStarted,
@@ -450,6 +492,8 @@ EventUnion = Annotated[
         WorkflowLog,
         WorkflowEnd,
         PermissionPresetSelected,
+        # v1.28 新增
+        RootCauseReport,
     ],
     Field(discriminator="type"),
 ]

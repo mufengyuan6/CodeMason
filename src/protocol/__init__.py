@@ -26,6 +26,7 @@ from .events import (
     Retry,
     RetryStarted,
     Rollback,
+    RootCauseReport,
     SnapshotCreated,
     TraceRecord,
     TurnCancelled,
@@ -90,6 +91,8 @@ __all__ = [
     "WorkflowLog",
     "WorkflowEnd",
     "PermissionPresetSelected",
+    # v1.28 落地新增
+    "RootCauseReport",
     # 工具函数
     "parse_op",
     "parse_event",
