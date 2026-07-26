@@ -213,6 +213,10 @@ _runtime_controller = None
 _op_router = None
 _ast_index = None
 _loop_scheduler = None
+# v1.28 G20：根因分析引擎 / 图谱查询工具 / YAGNI 归因报告
+_root_cause_analyzer = None
+_codegraph_query_tool = None
+_yagni_attribution = None
 
 
 def attach_v113_modules(ledger=None, metrics=None, health=None, recall=None) -> None:
@@ -243,6 +247,14 @@ def attach_v123b_modules(metrics=None, policy=None, runtime=None, router=None, a
     _op_router = router
     _ast_index = ast
     _loop_scheduler = scheduler
+
+
+def attach_v128_modules(root_cause=None, codegraph=None, yagni_attribution=None) -> None:
+    """挂载 v1.28 G20 模块实例：根因分析引擎 / 图谱查询工具 / YAGNI 高频问题归因。"""
+    global _root_cause_analyzer, _codegraph_query_tool, _yagni_attribution
+    _root_cause_analyzer = root_cause
+    _codegraph_query_tool = codegraph
+    _yagni_attribution = yagni_attribution
 
 
 @app.get("/costs", dependencies=[Depends(require_auth)])
@@ -445,6 +457,94 @@ async def skills_health():
     """Skill registry 健康信号（索引路径/条目数）。"""
     registry = _get_skill_registry()
     return {"enabled": True, **registry.stats()}
+
+
+# ========== v1.28 G20 端点：根因分析 / 溯源报告 / 图谱查询 / YAGNI 高频问题 ==========
+
+
+@app.get("/api/root-cause/reports", dependencies=[Depends(require_auth)])
+async def root_cause_reports(session_id: str = "", limit: int = 20):
+    """溯源报告列表（G20 ⑤沉淀：溯源即事件——从事件流投影，可审计可回放）。"""
+    if EVENT_LOG is None:
+        raise HTTPException(status_code=503, detail="驾驶舱未初始化")
+    from ..protocol import EventType
+
+    reports = []
+    for ev in EVENT_LOG.read_all():
+        if ev.type == EventType.ROOT_CAUSE_REPORT:
+            if session_id and ev.session_id != session_id:
+                continue
+            reports.append(
+                {
+                    "id": ev.id,
+                    "report_id": ev.report_id,
+                    "session_id": ev.session_id,
+                    "trigger": ev.trigger,
+                    "status": ev.status,
+                    "trigger_event_id": ev.trigger_event_id,
+                    "stages": ev.stages,
+                    "attributions": ev.attributions,
+                    "fix_instructions": ev.fix_instructions,
+                    "ts": ev.ts,
+                }
+            )
+            if len(reports) >= limit:
+                break
+    return {"enabled": True, "reports": reports, "count": len(reports)}
+
+
+@app.post("/api/root-cause/analyze", dependencies=[Depends(require_auth)])
+async def root_cause_analyze(req: dict = None):
+    """触发根因分析（G20：失败/疑问才溯源——非全库扫描，结构性防误报）。"""
+    req = req or {}
+    if _root_cause_analyzer is None:
+        raise HTTPException(status_code=503, detail="根因分析引擎未挂载")
+    trigger = req.get("trigger", "user_query")
+    if trigger not in ("verify_failed", "error", "user_query"):
+        raise HTTPException(status_code=400, detail="非法触发源")
+    report, feed = _root_cause_analyzer.analyze(
+        trigger=trigger,
+        trigger_event_id=int(req.get("trigger_event_id", 0)),
+        session_id=req.get("session_id", ""),
+        files=req.get("files") or [],
+    )
+    return {
+        "ok": True,
+        "report": {
+            "report_id": report.report_id,
+            "trigger": report.trigger,
+            "trigger_event_id": report.trigger_event_id,
+            "status": report.status,
+            "stages": report.stages,
+            "attributions": report.attributions,
+            "fix_instructions": report.fix_instructions,
+            "evidence": report.evidence,
+        },
+        "feed_forward": feed,
+    }
+
+
+@app.get("/api/codegraph/query", dependencies=[Depends(require_auth)])
+async def codegraph_query(op: str = "query", query: str = "", name: str = "", entity_id: str = "", limit: int = 10):
+    """图谱查询工具化（G20 确定性证据链底座——图谱从检索升级为分析找根因）。"""
+    if _codegraph_query_tool is None:
+        raise HTTPException(status_code=503, detail="图谱查询工具未挂载")
+    result = _codegraph_query_tool.run(
+        {"op": op, "query": query, "name": name, "entity_id": entity_id, "limit": limit}
+    )
+    return {"enabled": True, **result}
+
+
+@app.get("/api/attribution", dependencies=[Depends(require_auth)])
+async def attribution_report():
+    """YAGNI 高频问题归因报告（G20 代码评审场景：失败/变更相关聚合，非全库体检）。"""
+    if _yagni_attribution is None:
+        return {"enabled": False, "message": "YAGNI 归因报告器未挂载"}
+    return {
+        "enabled": True,
+        "top_issues": _yagni_attribution.top_issues(limit=20),
+        "stats": _yagni_attribution.stats(),
+    }
 
 
 # ========== WebSocket（核心） ==========

@@ -18,7 +18,13 @@ from pathlib import Path
 import uvicorn
 
 from . import main as web_main
-from .main import attach_v113_modules, attach_v123_modules, init_cockpit, mount_frontend
+from .main import (
+    attach_v113_modules,
+    attach_v123_modules,
+    attach_v128_modules,
+    init_cockpit,
+    mount_frontend,
+)
 
 
 def _mount_v113_modules() -> None:
@@ -64,6 +70,29 @@ def _mount_v123_modules() -> None:
     )
 
 
+def _mount_v128_modules() -> None:
+    """挂载 v1.28 G20 模块（根因分析引擎 / 图谱查询工具 / YAGNI 归因报告）——溯源驾驶舱可见。"""
+    from ..constraints.yagni_attribution import YagniAttributionReporter
+    from ..projection.attribution import AttributionEngine
+    from ..projection.root_cause_analyzer import RootCauseAnalyzer
+    from ..tools.builtins.codegraph_tools import CodegraphQueryTool
+
+    analyzer = None
+    if web_main.EVENT_LOG is not None:
+        analyzer = RootCauseAnalyzer(
+            web_main.EVENT_LOG,
+            session_id="web",
+            attribution_engine=AttributionEngine(provider=None),  # 无 provider → 纯确定性降级
+        )
+        if web_main.LOOP is not None:
+            web_main.LOOP.set_root_cause_analyzer(analyzer)  # 失败 → 溯源 → 诊断回喂
+    attach_v128_modules(
+        root_cause=analyzer,
+        codegraph=CodegraphQueryTool(),
+        yagni_attribution=YagniAttributionReporter(),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cockpit", description="CodeMason 驾驶舱")
     parser.add_argument("--port", type=int, default=48408, help="固定端口（local-port-manager 分配）")
@@ -78,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     init_cockpit(session_id=args.session, token=token)
     _mount_v113_modules()
     _mount_v123_modules()
+    _mount_v128_modules()
 
     frontend_dir = args.frontend
     if frontend_dir is None:
