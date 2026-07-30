@@ -137,6 +137,13 @@ export default function Timeline({ events, sendApproval }) {
               {ev.diff_preview && (
                 <pre className="diff-pre diff-pre-inline"><code>{ev.diff_preview}</code></pre>
               )}
+              {ev.rationale && (
+                <div className="ev-rationale" data-testid="ev-rationale">
+                  <span className="metric-chip">理由</span>
+                  <span className="ev-rationale-text">{ev.rationale}</span>
+                  <span className="ev-rationale-src">（模型自述理由，非验证事实）</span>
+                </div>
+              )}
               {renderApprovalActions(ev)}
             </div>
           </div>
@@ -148,6 +155,13 @@ export default function Timeline({ events, sendApproval }) {
             <div className="ev-body">
               <div className="ev-title">{ev.item_type}</div>
               {typeof ev.content === 'string' && <div className="ev-sub">{ev.content.slice(0, 200)}</div>}
+              {ev.rationale && (
+                <div className="ev-rationale" data-testid="ev-rationale">
+                  <span className="metric-chip">理由</span>
+                  <span className="ev-rationale-text">{ev.rationale}</span>
+                  <span className="ev-rationale-src">（模型自述理由，非验证事实）</span>
+                </div>
+              )}
               {ev.metrics && (
                 <div className="ev-metrics">
                   {Object.entries(ev.metrics).slice(0, 4).map(([k, v]) => (
@@ -164,6 +178,27 @@ export default function Timeline({ events, sendApproval }) {
         return <div className="ev-card ev-warn"><span className="ev-badge">回滚</span><div className="ev-body">已回滚到 Checkpoint {ev.checkpoint_id}</div></div>
       case 'Error':
         return <div className="ev-card ev-error"><span className="ev-badge">错误</span><div className="ev-body">{ev.message}</div></div>
+      case 'RootCauseReport':
+        return (
+          <div className="ev-card ev-rc" data-testid="ev-root-cause">
+            <span className="ev-badge" style={{ background: 'var(--c-accent, #7c5cff)' }}>溯源</span>
+            <div className="ev-body">
+              <div className="ev-title">溯源报告 {ev.report_id}</div>
+              <div className="ev-sub">
+                {ev.trigger} · {ev.status === 'degraded' ? '纯确定性' : '完整链路'} · {(ev.stages || []).length} 阶段定位
+              </div>
+              {(ev.stages || []).slice(0, 3).map((s, i) => (
+                <div key={i} className="ev-rc-stage">[{s.stage}] {s.issue}</div>
+              ))}
+              {(ev.attributions || []).slice(0, 2).map((a, i) => (
+                <div key={i} className="ev-rc-attr">
+                  {a.hypothesis}
+                  {a.agent_inferred && <span className="metric-chip">agent_inferred</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
       default:
         // 未知事件：不裸露原始数据（L7 修复），折叠展示
         return (

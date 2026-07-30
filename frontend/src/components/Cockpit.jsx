@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchSessions, switchSession, useCockpit } from '../api.js'
 import Timeline from './Timeline.jsx'
+import DialogueView from './DialogueView.jsx'
 import SessionRail from './SessionRail.jsx'
 import ConfirmDialog from './ConfirmDialog.jsx'
 import ThemePanel from './ThemePanel.jsx'
@@ -12,14 +13,17 @@ import HealthSignals from './HealthSignals.jsx'
 import ContributionPanel from './ContributionPanel.jsx'
 import ApprovalInboxPanel from './ApprovalInboxPanel.jsx'
 import VisionPanel from './VisionPanel.jsx'
+import RootCausePanel from './RootCausePanel.jsx'
 
 const HEALTH_POLL_MS = 15000
+const VIEW_KEY = 'codemason-center-view' // v1.29：对话视图/时间线双投影切换记忆
 
 /**
  * Cockpit 驾驶舱工作台（三区 · 主流程内联 + 监控抽屉）
  * - 左：会话栏（列表/新建/恢复，对标 pi-web）
  * - 中：事件流主流程（审批内联可操作 + 交付横幅 + 任务输入）
- * - 右：监控抽屉（文件/YAGNI/成本/上下文/健康，需要才打开）
+ *   v1.29：中区右上角"对话视图/时间线"双投影切换（对话是入口投影，时间线是审计投影）
+ * - 右：监控抽屉（文件/YAGNI/成本/上下文/健康/贡献/收件箱/视觉/溯源，需要才打开）
  * - 压缩/取消二次确认；模式切换带解释；健康信号被动横幅
  * - 主题系统（换壁纸式个性化）：顶栏 ⚙️ 打开主题面板
  */
@@ -29,6 +33,14 @@ export default function Cockpit({ onBack }) {
       return sessionStorage.getItem('codemason-session') || 'web'
     } catch {
       return 'web'
+    }
+  })
+  // v1.29：双投影切换（默认时间线=审计投影，对话视图=入口投影，sessionStorage 记忆）
+  const [centerView, setCenterView] = useState(() => {
+    try {
+      return sessionStorage.getItem(VIEW_KEY) || 'timeline'
+    } catch {
+      return 'timeline'
     }
   })
   const [sessions, setSessions] = useState([])
@@ -184,7 +196,32 @@ export default function Cockpit({ onBack }) {
         <SessionRail sessions={sessions} activeId={activeSession} onSelect={handleSessionSelect} onNew={handleSessionNew} />
 
         <main className="cp-center">
-          <Timeline events={events} sendApproval={sendApproval} />
+          {/* v1.29 双投影切换器：对话视图（折叠投影）/ 时间线（展开投影）——同一事件流两种渲染 */}
+          <div className="cp-center-switcher" data-testid="center-view-switcher">
+            <button
+              className={`view-btn ${centerView === 'dialogue' ? 'is-active' : ''}`}
+              onClick={() => {
+                setCenterView('dialogue')
+                try { sessionStorage.setItem(VIEW_KEY, 'dialogue') } catch { /* ignore */ }
+              }}
+              data-testid="view-dialogue"
+            >
+              对话视图
+            </button>
+            <button
+              className={`view-btn ${centerView === 'timeline' ? 'is-active' : ''}`}
+              onClick={() => {
+                setCenterView('timeline')
+                try { sessionStorage.setItem(VIEW_KEY, 'timeline') } catch { /* ignore */ }
+              }}
+              data-testid="view-timeline"
+            >
+              时间线
+            </button>
+          </div>
+          {centerView === 'dialogue'
+            ? <DialogueView events={events} sendApproval={sendApproval} />
+            : <Timeline events={events} sendApproval={sendApproval} />}
           <footer className="cp-inputbar">
             <div className="cp-mode-switch">
               <button className={`mode-btn ${mode === 'act' ? 'is-active' : ''}`} onClick={() => handleModeSwitch('act')} data-testid="mode-act">
@@ -226,6 +263,7 @@ export default function Cockpit({ onBack }) {
               { id: 'contribution', label: '贡献', icon: '📜' },
               { id: 'inbox', label: '收件箱', icon: '📥' },
               { id: 'vision', label: '视觉', icon: '👁' },
+              { id: 'rootcause', label: '溯源', icon: '🔍' },
             ].map((m) => (
               <button
                 key={m.id}
@@ -251,6 +289,7 @@ export default function Cockpit({ onBack }) {
               {drawerView === 'contribution' && <ContributionPanel />}
               {drawerView === 'inbox' && <ApprovalInboxPanel />}
               {drawerView === 'vision' && <VisionPanel events={events} />}
+              {drawerView === 'rootcause' && <RootCausePanel events={events} />}
             </div>
           )}
         </aside>
