@@ -547,6 +547,126 @@ async def attribution_report():
     }
 
 
+# ========== v1.31 G22 端点：自进化引擎 ==========
+
+_evolution_engine = None
+_evolution_policy = None
+_feedback_generalizer = None
+
+
+def attach_v131_modules(evolution_engine=None, evolution_policy=None,
+                        feedback_generalizer=None) -> None:
+    """挂载 v1.31 G22 模块实例：自进化引擎 / 策略层 / 反馈泛化器。"""
+    global _evolution_engine, _evolution_policy, _feedback_generalizer
+    _evolution_engine = evolution_engine
+    _evolution_policy = evolution_policy
+    _feedback_generalizer = feedback_generalizer
+
+
+@app.get("/api/evolution/status", dependencies=[Depends(require_auth)])
+async def evolution_status():
+    """自进化引擎状态（G22）：闭环运行状态 + 各目标健康度。"""
+    if _evolution_engine is None:
+        return {"enabled": False, "message": "自进化引擎未挂载"}
+    history = _evolution_engine.get_history(limit=5)
+    return {
+        "enabled": True,
+        "registered_targets": list(_evolution_engine._adapters.keys()),
+        "cycle_count": len(_evolution_engine._history),
+        "recent_cycles": history,
+    }
+
+
+@app.get("/api/evolution/cycles", dependencies=[Depends(require_auth)])
+async def evolution_cycles(limit: int = 20):
+    """进化周期历史（G22）：最近 N 次进化事件。"""
+    if _evolution_engine is None:
+        return {"enabled": False, "message": "自进化引擎未挂载"}
+    return {
+        "enabled": True,
+        "cycles": _evolution_engine.get_history(limit=limit),
+    }
+
+
+@app.post("/api/evolution/run", dependencies=[Depends(require_auth)])
+async def evolution_run(req: dict = None):
+    """手动触发一轮进化（G22）：Observe→Analyze→Improve→Verify→Persist。"""
+    req = req or {}
+    if _evolution_engine is None:
+        raise HTTPException(status_code=503, detail="自进化引擎未挂载")
+    trigger = req.get("trigger", "manual")
+    targets = req.get("targets")  # None = 全部
+    result = _evolution_engine.run_cycle(
+        session_id=req.get("session_id", "web"),
+        trigger=trigger,
+        targets=targets,
+        policy=_evolution_policy,
+    )
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/evolution/report", dependencies=[Depends(require_auth)])
+async def evolution_report():
+    """进化报告（G22）：五维度健康度 + 进化趋势。"""
+    if _evolution_engine is None:
+        return {"enabled": False, "message": "自进化引擎未挂载"}
+    history = _evolution_engine.get_history(limit=50)
+    total_applied = sum(c.get("applied", 0) for c in history)
+    total_cycles = len(history)
+    return {
+        "enabled": True,
+        "total_cycles": total_cycles,
+        "total_applied": total_applied,
+        "avg_duration_ms": sum(c.get("duration_ms", 0) for c in history) / max(1, total_cycles),
+        "targets": list(_evolution_engine._adapters.keys()),
+        "policy": {
+            "max_items_per_cycle": _evolution_policy.config.max_items_per_cycle if _evolution_policy else None,
+            "cooldown_hours": _evolution_policy.config.cooldown_hours if _evolution_policy else None,
+        },
+    }
+
+
+@app.post("/api/evolution/feedback", dependencies=[Depends(require_auth)])
+async def evolution_feedback(req: dict = None):
+    """用户反馈泛化（G22 FeedbackGeneralizer）：一次纠正→泛化到同类场景。"""
+    req = req or {}
+    if _feedback_generalizer is None:
+        raise HTTPException(status_code=503, detail="反馈泛化器未挂载")
+    from ..evolution.feedback import UserCorrection
+
+    correction = UserCorrection(
+        correction_id=req.get("correction_id", ""),
+        original_output=req.get("original_output", ""),
+        corrected_output=req.get("corrected_output", ""),
+        context=req.get("context", {}),
+        session_id=req.get("session_id", "web"),
+    )
+    result = _feedback_generalizer.process_correction(correction)
+    return {
+        "ok": True,
+        "feedback_type": result.feedback_type,
+        "generalized_count": result.generalized_count,
+        "requires_confirmation": result.requires_confirmation,
+        "affected_items": result.affected_items,
+    }
+
+
+@app.get("/api/evolution/health", dependencies=[Depends(require_auth)])
+async def evolution_health():
+    """五维度健康度仪表盘（G22 驾驶舱进化视图）。"""
+    if _evolution_engine is None:
+        return {"enabled": False, "message": "自进化引擎未挂载"}
+    return {"enabled": True, "health": _evolution_engine.get_health_report()}
+
+
+@app.get("/api/evolution/trend", dependencies=[Depends(require_auth)])
+async def evolution_trend(limit: int = 50):
+    """进化趋势数据（G22 驾驶舱进化曲线：同类任务 token 消耗 vs 执行轮次）。"""
+    if _evolution_engine is None:
+        return {"enabled": False, "message": "自进化引擎未挂载"}
+    return {"enabled": True, "trend": _evolution_engine.get_trend_data(limit=limit)}
+
+
 # ========== WebSocket（核心） ==========
 
 async def _broadcast(event_obj) -> None:

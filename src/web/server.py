@@ -110,6 +110,43 @@ def _mount_v128_modules() -> None:
     )
 
 
+def _mount_v131_modules() -> None:
+    """挂载 v1.31 G22 模块（自进化引擎）——进化闭环可见。
+
+    Evolution Engine 编排层 + EvolutionPolicy 策略层 + 五个适配器 + FeedbackGeneralizer
+    """
+    from ..evolution import EvolutionEngine, EvolutionPolicy
+    from ..evolution.adapters import (
+        HarnessOnlineAdapter,
+        MemoryDreamingAdapter,
+        PlanningImprovementAdapter,
+        SkillEvolutionAdapter,
+        ToolUsageAdapter,
+    )
+    from ..evolution.feedback import FeedbackGeneralizer
+
+    engine = EvolutionEngine()
+    policy = EvolutionPolicy()
+    feedback = FeedbackGeneralizer()
+
+    # 注册五个适配器
+    engine.register_adapter("memory", MemoryDreamingAdapter())
+    engine.register_adapter("skill", SkillEvolutionAdapter())
+    engine.register_adapter("planning", PlanningImprovementAdapter())
+    engine.register_adapter("tool_usage", ToolUsageAdapter())
+    engine.register_adapter("harness", HarnessOnlineAdapter())
+
+    # 接入 AgentLoop
+    if web_main.LOOP is not None:
+        web_main.LOOP.set_evolution_engine(engine)
+
+    attach_v131_modules(
+        evolution_engine=engine,
+        evolution_policy=policy,
+        feedback_generalizer=feedback,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cockpit", description="CodeMason 驾驶舱")
     parser.add_argument("--port", type=int, default=48408, help="固定端口（local-port-manager 分配）")
@@ -139,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     _mount_v113_modules()
     _mount_v123_modules()
     _mount_v128_modules()
+    _mount_v131_modules()
 
     frontend_dir = args.frontend
     if frontend_dir is None:

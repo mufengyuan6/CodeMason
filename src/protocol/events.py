@@ -57,6 +57,36 @@ class EventType(str, Enum):
     PERMISSION_PRESET_SELECTED = "PermissionPresetSelected"  # 权限预设选择（v1.26，G19）：组合开关选择事件
     # ---- v1.28 落地新增（G20 事件驱动根因分析） ----
     ROOT_CAUSE_REPORT = "RootCauseReport"       # 溯源报告（G20 ⑤沉淀）：溯源即事件，可审计可回放
+    # ---- v1.30 落地新增（Agent Runtime 统一层） ----
+    SESSION_CREATED = "SessionCreated"           # 会话创建（RuntimeLifecycle）
+    SESSION_STATE_CHANGED = "SessionStateChanged"  # 会话状态变更
+    SESSION_DESTROYED = "SessionDestroyed"       # 会话销毁
+    CONTEXT_INJECTED = "ContextInjected"         # 上下文注入
+    TOOL_EXECUTION_STARTED = "ToolExecutionStarted"  # 工具执行开始
+    TOOL_EXECUTION_COMPLETED = "ToolExecutionCompleted"  # 工具执行完成
+    TOOL_EXECUTION_FAILED = "ToolExecutionFailed"  # 工具执行失败
+    TASK_CREATED = "TaskCreated"                 # 任务创建（AgentCoordinator）
+    TASK_ASSIGNED = "TaskAssigned"               # 任务分配
+    TASK_STARTED = "TaskStarted"                 # 任务开始
+    TASK_COMPLETED = "TaskCompleted"             # 任务完成
+    TASK_FAILED = "TaskFailed"                   # 任务失败
+    TRACE_SPAN_STARTED = "TraceSpanStarted"     # 追踪跨度开始（ObservabilityLayer）
+    TRACE_SPAN_ENDED = "TraceSpanEnded"         # 追踪跨度结束
+    AUDIT_RECORDED = "AuditRecorded"             # 审计记录
+    SANDBOX_CREATED = "SandboxCreated"           # 沙箱创建（SandboxManager）
+    SANDBOX_STARTED = "SandboxStarted"           # 沙箱启动
+    SANDBOX_STOPPED = "SandboxStopped"           # 沙箱停止
+    SANDBOX_EXECUTION_STARTED = "SandboxExecutionStarted"  # 沙箱执行开始
+    SANDBOX_EXECUTION_COMPLETED = "SandboxExecutionCompleted"  # 沙箱执行完成
+    # ---- v1.31 新增（G22 自进化引擎） ----
+    EVOLUTION_CYCLE_STARTED = "EvolutionCycleStarted"        # 进化周期开始
+    EVOLUTION_CANDIDATE_GENERATED = "EvolutionCandidateGenerated"  # 改进候选生成
+    EVOLUTION_VALIDATED = "EvolutionValidated"               # 验证通过
+    EVOLUTION_APPLIED = "EvolutionApplied"                   # 改进生效
+    DREAMING_CONSOLIDATION = "DreamingConsolidation"         # Memory Dreaming
+    SKILL_EVOLVED = "SkillEvolved"                           # Skill 自进化
+    FEEDBACK_GENERALIZED = "FeedbackGeneralized"             # 用户反馈泛化
+    EVOLUTION_ROLLED_BACK = "EvolutionRolledBack"            # 进化回滚
 
 
 class Event(BaseModel):
@@ -464,6 +494,307 @@ class RootCauseReport(Event):
     feed_forward: Optional[dict] = Field(default=None, description="诊断回喂载荷 {injected_turn, injected_step, prompt_fragment}")
 
 
+# ========== v1.30 落地新增事件（Agent Runtime 统一层） ==========
+
+
+class SessionCreated(Event):
+    """会话创建（v1.30 RuntimeLifecycle）——会话生命周期起点。"""
+
+    type: Literal[EventType.SESSION_CREATED] = EventType.SESSION_CREATED
+    session_id: str = Field(description="会话 ID")
+    metadata: dict = Field(default_factory=dict, description="会话元数据")
+
+
+class SessionStateChanged(Event):
+    """会话状态变更（v1.30 RuntimeLifecycle）——状态转换可审计。"""
+
+    type: Literal[EventType.SESSION_STATE_CHANGED] = EventType.SESSION_STATE_CHANGED
+    session_id: str
+    old_state: str = Field(description="原状态")
+    new_state: str = Field(description="新状态")
+
+
+class SessionDestroyed(Event):
+    """会话销毁（v1.30 RuntimeLifecycle）。"""
+
+    type: Literal[EventType.SESSION_DESTROYED] = EventType.SESSION_DESTROYED
+    session_id: str
+
+
+class ContextInjected(Event):
+    """上下文注入（v1.30 RuntimeLifecycle）——注入审计。"""
+
+    type: Literal[EventType.CONTEXT_INJECTED] = EventType.CONTEXT_INJECTED
+    session_id: str
+    context_type: str = Field(description="上下文类型（memory/plan/state）")
+    context_data: dict = Field(default_factory=dict, description="上下文数据")
+
+
+class ToolExecutionStarted(Event):
+    """工具执行开始（v1.30 ToolExecutionLoop）。"""
+
+    type: Literal[EventType.TOOL_EXECUTION_STARTED] = EventType.TOOL_EXECUTION_STARTED
+    execution_id: str
+    tool_name: str
+    tool_args: dict = Field(default_factory=dict)
+
+
+class ToolExecutionCompleted(Event):
+    """工具执行完成（v1.30 ToolExecutionLoop）。"""
+
+    type: Literal[EventType.TOOL_EXECUTION_COMPLETED] = EventType.TOOL_EXECUTION_COMPLETED
+    execution_id: str
+    tool_name: str
+    result: dict = Field(default_factory=dict)
+    duration_ms: float = Field(default=0.0)
+
+
+class ToolExecutionFailed(Event):
+    """工具执行失败（v1.30 ToolExecutionLoop）。"""
+
+    type: Literal[EventType.TOOL_EXECUTION_FAILED] = EventType.TOOL_EXECUTION_FAILED
+    execution_id: str
+    tool_name: str
+    error: str = Field(description="错误信息")
+    duration_ms: float = Field(default=0.0)
+
+
+class TaskCreated(Event):
+    """任务创建（v1.30 AgentCoordinator）。"""
+
+    type: Literal[EventType.TASK_CREATED] = EventType.TASK_CREATED
+    task_id: str
+    description: str
+    assigned_to: Optional[str] = None
+
+
+class TaskAssigned(Event):
+    """任务分配（v1.30 AgentCoordinator）。"""
+
+    type: Literal[EventType.TASK_ASSIGNED] = EventType.TASK_ASSIGNED
+    task_id: str
+    agent_id: str
+
+
+class TaskStarted(Event):
+    """任务开始（v1.30 AgentCoordinator）。"""
+
+    type: Literal[EventType.TASK_STARTED] = EventType.TASK_STARTED
+    task_id: str
+    agent_id: Optional[str] = None
+
+
+class TaskCompleted(Event):
+    """任务完成（v1.30 AgentCoordinator）。"""
+
+    type: Literal[EventType.TASK_COMPLETED] = EventType.TASK_COMPLETED
+    task_id: str
+    agent_id: Optional[str] = None
+    result: dict = Field(default_factory=dict)
+    duration_ms: float = Field(default=0.0)
+
+
+class TaskFailed(Event):
+    """任务失败（v1.30 AgentCoordinator）。"""
+
+    type: Literal[EventType.TASK_FAILED] = EventType.TASK_FAILED
+    task_id: str
+    agent_id: Optional[str] = None
+    error: str = Field(description="错误信息")
+
+
+class TraceSpanStarted(Event):
+    """追踪跨度开始（v1.30 ObservabilityLayer）。"""
+
+    type: Literal[EventType.TRACE_SPAN_STARTED] = EventType.TRACE_SPAN_STARTED
+    span_id: str
+    operation: str
+    parent_span_id: Optional[str] = None
+
+
+class TraceSpanEnded(Event):
+    """追踪跨度结束（v1.30 ObservabilityLayer）。"""
+
+    type: Literal[EventType.TRACE_SPAN_ENDED] = EventType.TRACE_SPAN_ENDED
+    span_id: str
+    status: str = Field(default="ok")
+    duration_ms: float = Field(default=0.0)
+
+
+class AuditRecorded(Event):
+    """审计记录（v1.30 ObservabilityLayer）。"""
+
+    type: Literal[EventType.AUDIT_RECORDED] = EventType.AUDIT_RECORDED
+    record_id: str
+    action: str
+    resource: str
+    actor: str
+    outcome: str
+
+
+class SandboxCreated(Event):
+    """沙箱创建（v1.30 SandboxManager）。"""
+
+    type: Literal[EventType.SANDBOX_CREATED] = EventType.SANDBOX_CREATED
+    sandbox_id: str
+    backend: str = Field(default="local")
+
+
+class SandboxStarted(Event):
+    """沙箱启动（v1.30 SandboxManager）。"""
+
+    type: Literal[EventType.SANDBOX_STARTED] = EventType.SANDBOX_STARTED
+    sandbox_id: str
+
+
+class SandboxStopped(Event):
+    """沙箱停止（v1.30 SandboxManager）。"""
+
+    type: Literal[EventType.SANDBOX_STOPPED] = EventType.SANDBOX_STOPPED
+    sandbox_id: str
+
+
+class SandboxExecutionStarted(Event):
+    """沙箱执行开始（v1.30 SandboxManager）。"""
+
+    type: Literal[EventType.SANDBOX_EXECUTION_STARTED] = EventType.SANDBOX_EXECUTION_STARTED
+    sandbox_id: str
+    command: str
+
+
+class SandboxExecutionCompleted(Event):
+    """沙箱执行完成（v1.30 SandboxManager）。"""
+
+    type: Literal[EventType.SANDBOX_EXECUTION_COMPLETED] = EventType.SANDBOX_EXECUTION_COMPLETED
+    sandbox_id: str
+    command: str
+    exit_code: int = Field(default=0)
+
+
+# ========== v1.31 新增事件（G22 自进化引擎） ==========
+
+
+class EvolutionEvent(Event):
+    """自进化事件基类（v1.31，G22）——所有进化事件共享的字段。
+
+    进化闭环：Observe→Analyze→Improve→Verify→Persist，五个作用目标
+    （Memory/Skill/Planning/Tool Usage/Harness）共享同一闭环，策略层控制边界。
+    """
+
+    session_id: str
+    phase: str = Field(description="闭环阶段：observe/analyze/improve/verify/persist")
+    target: str = Field(description="作用目标：memory/skill/planning/tool_usage/harness")
+    trigger: str = Field(default="system_failure", description="触发源：system_failure/user_feedback/periodic/manual")
+    evidence: list = Field(default_factory=list, description="触发进化的事件 ID 列表（溯源锚点）")
+    details: dict = Field(default_factory=dict, description="阶段特定详情")
+
+
+class EvolutionCycleStarted(EvolutionEvent):
+    """一轮进化周期开始（v1.31，G22）。
+
+    标记进化的起点，cycle_id 贯穿整轮闭环的全部事件。
+    """
+
+    type: Literal[EventType.EVOLUTION_CYCLE_STARTED] = EventType.EVOLUTION_CYCLE_STARTED
+    cycle_id: str = Field(description="本轮进化周期 ID（贯穿整轮闭环）")
+
+
+class EvolutionCandidateGenerated(EvolutionEvent):
+    """改进候选生成（v1.31，G22 Improve 阶段）。
+
+    候选包含：预期效果、影响范围、回滚方案、置信度。
+    """
+
+    type: Literal[EventType.EVOLUTION_CANDIDATE_GENERATED] = EventType.EVOLUTION_CANDIDATE_GENERATED
+    cycle_id: str = Field(description="所属进化周期 ID")
+    candidate_id: str = Field(description="候选 ID")
+    expected_effect: str = Field(default="", description="预期效果描述")
+    confidence: float = Field(default=0.0, description="置信度 0-1")
+    rollback_plan: str = Field(default="", description="回滚方案")
+
+
+class EvolutionValidated(EvolutionEvent):
+    """验证通过（v1.31，G22 Verify 阶段）。
+
+    三阶段验证流水线结果：Generate→Evaluate→Refine。
+    """
+
+    type: Literal[EventType.EVOLUTION_VALIDATED] = EventType.EVOLUTION_VALIDATED
+    cycle_id: str = Field(description="所属进化周期 ID")
+    candidate_id: str = Field(description="被验证的候选 ID")
+    validation_result: Literal["pass", "fail", "partial"] = Field(description="验证结果")
+    regression_delta: float = Field(default=0.0, description="回归指标变化（正=提升，负=退化）")
+    metrics_before: dict = Field(default_factory=dict, description="验证前指标快照")
+    metrics_after: dict = Field(default_factory=dict, description="验证后指标快照")
+
+
+class EvolutionApplied(EvolutionEvent):
+    """改进生效（v1.31，G22 Persist 阶段）。
+
+    进化结果写回系统：更新记忆/Skill/策略 + 标记 supersede。
+    """
+
+    type: Literal[EventType.EVOLUTION_APPLIED] = EventType.EVOLUTION_APPLIED
+    cycle_id: str = Field(description="所属进化周期 ID")
+    candidate_id: str = Field(description="被应用的候选 ID")
+    applied_items: list = Field(default_factory=list, description="被修改的条目列表 [{id, type, action}]")
+    superseded_ids: list = Field(default_factory=list, description="被 supersede 的旧条目 ID")
+
+
+class DreamingConsolidation(EvolutionEvent):
+    """Memory Dreaming 整合（v1.31，G22 Memory 作用目标）。
+
+    记忆离线整合：合并/淘汰/提炼——对标 ReMe ACL 2026。
+    """
+
+    type: Literal[EventType.DREAMING_CONSOLIDATION] = EventType.DREAMING_CONSOLIDATION
+    cycle_id: str = Field(description="所属进化周期 ID")
+    consolidated_count: int = Field(default=0, description="整合的记忆条目数")
+    merged: int = Field(default=0, description="合并数")
+    pruned: int = Field(default=0, description="淘汰数")
+    refined: int = Field(default=0, description="提炼数")
+
+
+class SkillEvolved(EvolutionEvent):
+    """Skill 自进化（v1.31，G22 Skill 作用目标）。
+
+    Read-Write Reflective Learning——对标 Memento-Skills。
+    """
+
+    type: Literal[EventType.SKILL_EVOLVED] = EventType.SKILL_EVOLVED
+    cycle_id: str = Field(description="所属进化周期 ID")
+    skill_name: str = Field(description="进化的 Skill 名")
+    changes: list = Field(default_factory=list, description="变更内容 [{field, old, new}]")
+    deploy_stage: Literal["shadow", "canary", "full"] = Field(default="shadow", description="发布阶段")
+
+
+class FeedbackGeneralized(EvolutionEvent):
+    """用户反馈泛化（v1.31，G22 FeedbackGeneralizer）。
+
+    一次纠正→泛化到同类场景——对应 JD"单轨迹偏好学习+纠正泛化"。
+    """
+
+    type: Literal[EventType.FEEDBACK_GENERALIZED] = EventType.FEEDBACK_GENERALIZED
+    cycle_id: str = Field(default="", description="所属进化周期 ID（可空：反馈闭环独立触发）")
+    feedback_type: Literal["temp_info", "scene_pref", "long_rule"] = Field(description="反馈分类：临时信息/场景偏好/长期规律")
+    original_correction: str = Field(default="", description="用户原始纠正内容")
+    generalized_count: int = Field(default=0, description="泛化到的同类场景数")
+    affected_items: list = Field(default_factory=list, description="受影响的条目列表")
+
+
+class EvolutionRolledBack(EvolutionEvent):
+    """进化回滚（v1.31，G22 EvolutionPolicy）。
+
+    进化失败或效果不达标时自动回退到上一版。
+    """
+
+    type: Literal[EventType.EVOLUTION_ROLLED_BACK] = EventType.EVOLUTION_ROLLED_BACK
+    cycle_id: str = Field(description="所属进化周期 ID")
+    candidate_id: str = Field(description="被回滚的候选 ID")
+    reason: str = Field(description="回滚原因（regression/timeout/manual）")
+    rolled_back_items: list = Field(default_factory=list, description="被回滚的条目列表")
+
+
 EventUnion = Annotated[
     Union[
         TurnStarted,
@@ -494,6 +825,36 @@ EventUnion = Annotated[
         PermissionPresetSelected,
         # v1.28 新增
         RootCauseReport,
+        # v1.30 新增（Agent Runtime 统一层）
+        SessionCreated,
+        SessionStateChanged,
+        SessionDestroyed,
+        ContextInjected,
+        ToolExecutionStarted,
+        ToolExecutionCompleted,
+        ToolExecutionFailed,
+        TaskCreated,
+        TaskAssigned,
+        TaskStarted,
+        TaskCompleted,
+        TaskFailed,
+        TraceSpanStarted,
+        TraceSpanEnded,
+        AuditRecorded,
+        SandboxCreated,
+        SandboxStarted,
+        SandboxStopped,
+        SandboxExecutionStarted,
+        SandboxExecutionCompleted,
+        # v1.31 新增（G22 自进化引擎）
+        EvolutionCycleStarted,
+        EvolutionCandidateGenerated,
+        EvolutionValidated,
+        EvolutionApplied,
+        DreamingConsolidation,
+        SkillEvolved,
+        FeedbackGeneralized,
+        EvolutionRolledBack,
     ],
     Field(discriminator="type"),
 ]

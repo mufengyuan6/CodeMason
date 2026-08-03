@@ -145,6 +145,14 @@ class AgentLoop:
         """
         self.llm = llm
 
+    def set_evolution_engine(self, engine: object) -> None:
+        """v1.31 G22：注入自进化引擎（EvolutionEngine）。
+
+        进化闭环：Observe→Analyze→Improve→Verify→Persist
+        五个作用目标共享同一闭环，策略层控制进化边界。
+        """
+        self._evolution_engine = engine
+
     # ---------- Op 入口 ----------
 
     def _next_event_id(self) -> int:
