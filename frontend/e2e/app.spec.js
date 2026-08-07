@@ -344,3 +344,102 @@ test.describe('v1.23 新增视图', () => {
     expect(body.stats).toBeTruthy()
   })
 })
+
+test.describe('v1.29 双投影（对话视图/时间线）', () => {
+  test('切换器存在，默认时间线，切对话视图后事件等价', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('nav').getByText('Start').click()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+
+    // 切换器可见
+    const switcher = page.getByTestId('center-view-switcher')
+    await expect(switcher).toBeVisible()
+    // 默认时间线（展开投影）
+    await expect(page.getByTestId('timeline')).toBeVisible()
+
+    // 切到对话视图（折叠投影）——同一事件流两种渲染
+    await page.getByTestId('view-dialogue').click()
+    await expect(page.getByTestId('dialogue-view')).toBeVisible()
+    // 切换不丢上下文：时间线事件仍在（事件流是同一数据层）
+    await page.getByTestId('view-timeline').click()
+    await expect(page.getByTestId('timeline')).toBeVisible()
+  })
+
+  test('对话视图切换记忆（sessionStorage 恢复上次选择）', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('nav').getByText('Start').click()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+
+    await page.getByTestId('view-dialogue').click()
+    await expect(page.getByTestId('dialogue-view')).toBeVisible()
+
+    // 刷新页面 → 恢复对话视图（sessionStorage 记忆）
+    await page.reload()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+    await expect(page.getByTestId('dialogue-view')).toBeVisible()
+  })
+
+  test('对话视图空态渲染（无事件安全）', async ({ page, request }) => {
+    // 切到一次性新会话，确保事件流为空（服务端 web 会话是持久化的，可能有历史事件）
+    const fresh = `e2e-empty-${Date.now()}`
+    const res = await request.post('http://127.0.0.1:29864/sessions/switch', {
+      headers: { 'x-agent-token': 'demo-token' },
+      data: { session_id: fresh },
+    })
+    expect(res.status()).toBe(200)
+
+    await page.goto('/')
+    await page.getByTestId('nav').getByText('Start').click()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+    await page.getByTestId('view-dialogue').click()
+    await expect(page.getByTestId('dialogue-view')).toBeVisible()
+    // 空态（新会话无事件 → 对话为空；正则命中 2 个元素，用 first 消歧）
+    await expect(page.getByText('对话为空')).toBeVisible()
+    await expect(page.getByText('在下方输入任务，对话会显示在这里')).toBeVisible()
+  })
+})
+
+test.describe('v1.28 溯源报告（G20）', () => {
+  test('溯源抽屉：打开渲染，空态可见', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('nav').getByText('Start').click()
+    await expect(page.getByTestId('cockpit')).toBeVisible()
+
+    await page.getByTestId('drawer-rootcause').click()
+    const panel = page.getByTestId('root-cause-panel')
+    await expect(panel).toBeVisible()
+    // 空态（事件流暂无 RootCauseReport）
+    await expect(panel).toContainText(/溯源报告|暂无溯源/)
+    await page.getByTestId('drawer-rootcause').click()
+    await expect(page.getByTestId('drawer-panel')).not.toBeVisible()
+  })
+
+  test('v1.28 后端 API：根因分析 + 溯源报告 + 图谱查询 + 归因可查询', async ({ request }) => {
+    const token = 'demo-token'
+    // 图谱查询（确定性证据链底座）
+    const res1 = await request.get('http://127.0.0.1:29864/api/codegraph/query?op=pagerank&limit=5', {
+      headers: { 'x-agent-token': token },
+    })
+    expect(res1.status()).toBe(200)
+    expect((await res1.json()).enabled).toBe(true)
+
+    // 溯源报告列表（溯源即事件，事件流投影）
+    const res2 = await request.get('http://127.0.0.1:29864/api/root-cause/reports', {
+      headers: { 'x-agent-token': token },
+    })
+    expect(res2.status()).toBe(200)
+    const body2 = await res2.json()
+    expect(body2.enabled).toBe(true)
+    expect(Array.isArray(body2.reports)).toBe(true)
+
+    // YAGNI 高频问题归因（代码评审场景）
+    const res3 = await request.get('http://127.0.0.1:29864/api/attribution', {
+      headers: { 'x-agent-token': token },
+    })
+    expect(res3.status()).toBe(200)
+    const body3 = await res3.json()
+    expect(body3.enabled).toBe(true)
+    expect(Array.isArray(body3.top_issues)).toBe(true)
+  })
+})
+
