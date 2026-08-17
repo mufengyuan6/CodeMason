@@ -24,6 +24,9 @@ CodeMason 是 Claude Code / Cline 同级的自主编码 Agent：理解需求 →
 - **Team Kernel 多人协作**：单写者协调（并行读者 context firewall）+ 事件触发（GitHub Issue/PR @agent + Slack/飞书 mention → 自动开任务）+ 三级权限矩阵（team/department/org × public/team/secret 敏感度，secret 白名单）+ AGENTS.md 渐进式披露（目录角色 + 32KiB 校验）
 - **AI 贡献报告（合规透明）**：`ContributionReport = f(EventLog, policy)` 纯投影零 LLM——files+line_range+changed_by+provenance / ai_involvement / verification / cost 四维明细；git_attribution_metadata 生成 `Co-Authored-By: CodeMason AI Agent` trailer（EU AI Act Article 50 透明披露）
 - **OTel 遥测导出**：事件流订阅 → OTLP 记录（prompt/审批决策/工具结果/沙箱轨迹），无端点优雅降级 + 快照 JSONL 导出，企业合规可对接
+- **事件驱动根因分析（G20）**：验证失败的下一跳不是"再试一次"而是"先溯源"——失败/疑问触发（非全库扫描，结构性防误报）→ 确定性证据链（图谱调用链 BFS + 事件流失败链回溯 + FixPacket 机读契约 + YAGNI 静态分析外环）→ LLM 归因假设（fresh-context + Doubt-driven 证伪，`agent_inferred` 永不自动升级）→ 溯源报告（search/read/edit 三阶段定位 + 证据集 + 修复指令）→ 诊断回喂（报告注入下一轮修复，CodeTracer 反思回放）→ 沉淀（`RootCauseReport` 事件进事件流可审计）；`codegraph_query` 工具 + PageRank 影响面排序；YAGNI 高频问题归因报告（代码评审场景）
+- **TRAJEVAL 三阶段评测**：任务级 pass@1 之外的工具级指标——轨迹分解 search/read/edit 逐段 precision/recall（对比 gold patch），输出工具调用正确率 / 调用链可靠性 / 失败阶段分布独立指标；30 自建任务集（有 gold patch + 三阶段标注，客观断言零 LLM 判定，可复现）
+- **对话投影视图（产品形态定稿）**：数据层在前——Op/Event 事件流是唯一真相，UI 是它的同源投影；驾驶舱中区双投影切换（对话视图=折叠投影 minimal：对话气泡 + 工具调用折叠卡 rich / 时间线=展开投影 rich），同一事件流两种渲染，切换不丢上下文、审批可原地展开、贡献报告可追溯；**Op rationale 字段**——每个工具调用携带模型一句话理由（≤20 词），事件标注 `rationale_source=model_self_report`（模型自述理由，非验证事实），"可解释性"三层兑现：show=事件流 / explain=rationale / justify=分类器+贡献报告
 
 ## 架构
 
