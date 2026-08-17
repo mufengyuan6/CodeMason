@@ -71,18 +71,35 @@ def _mount_v123_modules() -> None:
 
 
 def _mount_v128_modules() -> None:
-    """挂载 v1.28 G20 模块（根因分析引擎 / 图谱查询工具 / YAGNI 归因报告）——溯源驾驶舱可见。"""
+    """挂载 v1.28 G20 模块（根因分析引擎 / 图谱查询工具 / YAGNI 归因报告）——溯源驾驶舱可见。
+
+    v1.30 T-11c：归因引擎接真实 LLM provider（deepseek-v4-flash）——溯源从
+    status=degraded 降级变为 status=complet 真实归因假设（Doubt-driven 证伪）。
+    """
     from ..constraints.yagni_attribution import YagniAttributionReporter
     from ..projection.attribution import AttributionEngine
     from ..projection.root_cause_analyzer import RootCauseAnalyzer
     from ..tools.builtins.codegraph_tools import CodegraphQueryTool
+
+    # 归因引擎：从凭据通道获取真实 LLM provider（失败降级纯确定性）
+    attribution_provider = None
+    try:
+        from ..providers.adapter import build_adapter_from_credentials
+
+        adapter = build_adapter_from_credentials()
+        # ModelRouterAdapter.generate(role=...) 返回 str，AttributionEngine 需要 provider.chat()→str
+        # 用 adapter.router 的主 provider（deepseek，architect/editor）
+        if adapter.router is not None:
+            attribution_provider = adapter.router.provider
+    except Exception:
+        pass  # 无凭据 → 纯确定性降级（fail-safe）
 
     analyzer = None
     if web_main.EVENT_LOG is not None:
         analyzer = RootCauseAnalyzer(
             web_main.EVENT_LOG,
             session_id="web",
-            attribution_engine=AttributionEngine(provider=None),  # 无 provider → 纯确定性降级
+            attribution_engine=AttributionEngine(provider=attribution_provider),
         )
         if web_main.LOOP is not None:
             web_main.LOOP.set_root_cause_analyzer(analyzer)  # 失败 → 溯源 → 诊断回喂
@@ -105,6 +122,20 @@ def main(argv: list[str] | None = None) -> int:
 
     token = args.token or secrets.token_hex(8)
     init_cockpit(session_id=args.session, token=token)
+
+    # v1.30 T-11c：注入真实 LLM 到 LOOP（deepseek-v4-flash architect/editor）
+    # 失败（缺凭据）→ LOOP 保持空 llm（内核不崩，状态机仍运行，只是规划阶段无输出）
+    if web_main.LOOP is not None:
+        try:
+            from ..providers.adapter import build_adapter_from_credentials
+
+            real_llm = build_adapter_from_credentials()
+            web_main.LOOP.set_llm(real_llm)
+            print(f"  LLM: {real_llm.router.provider.config.name if real_llm.router else 'mock'} "
+                  f"({real_llm.router.provider.config.default_model if real_llm.router else 'fallback'})")
+        except Exception as e:
+            print(f"  LLM: 降级 Mock（{e}）")
+
     _mount_v113_modules()
     _mount_v123_modules()
     _mount_v128_modules()
@@ -119,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  地址: http://{args.host}:{args.port}")
     print(f"  Token: {token}")
     print(f"  会话: {args.session}  事件: {web_main.EVENT_LOG.path}")
+    llm_info = getattr(web_main.LOOP, '_llm_info', 'unknown')
+    print(f"  LLM: {llm_info}")
     print("  注意: 默认只绑 127.0.0.1，Web 可审批命令（攻击面最小化 G5）")
     print("=" * 50)
 

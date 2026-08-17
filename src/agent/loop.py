@@ -137,6 +137,14 @@ class AgentLoop:
         """
         self._root_cause_analyzer = analyzer
 
+    def set_llm(self, llm: object) -> None:
+        """v1.30 T-11c：热注入真实 LLM（ModelRouterAdapter），运行时替换 Mock。
+
+        场景：init_cockpit 时 LLM 凭据未就绪（先启动服务再配凭据），或运行中切换模型。
+        None = 恢复 Mock（不阻断内核）。
+        """
+        self.llm = llm
+
     # ---------- Op 入口 ----------
 
     def _next_event_id(self) -> int:
