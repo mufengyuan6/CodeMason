@@ -92,3 +92,8 @@ a.py
 
 # v1.27 Skill registry 运行时索引（自动生成，勿提交）
 skills/.index.json
+
+# 技术方案调研报告
+*.md
+!README.md
+!docs/*.md

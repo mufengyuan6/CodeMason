@@ -1,0 +1,1 @@
+{"status":"healthy","components":{"parser":"ready","rules_engine":"ready","hooks":"ready","analyzer":"ready","planner":"ready","executor":"ready","validator":"ready","orchestrator":"ready","evaluator":"ready","compressor":"ready","router":"ready","memory":"ready"}}

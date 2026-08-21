@@ -1,0 +1,1 @@
+{"detail":[{"type":"missing","loc":["body","code"],"msg":"Field required","input":{"wrong_field":"x"}},{"type":"missing","loc":["body","file_path"],"msg":"Field required","input":{"wrong_field":"x"}}]}

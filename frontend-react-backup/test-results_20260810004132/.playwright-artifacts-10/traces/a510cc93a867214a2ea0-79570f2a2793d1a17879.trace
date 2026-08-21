@@ -1,0 +1,14 @@
+{"version":8,"type":"context-options","origin":"library","browserName":"","playwrightVersion":"1.62.1","options":{},"platform":"win32","wallTime":1786291458101,"monotonicTime":60719.442,"sdkLanguage":"javascript","contextId":"request-context@b542559d7f0820e86993f2235b4fbfba","title":"app.spec.js:259 › 错误处理与健壮性 › 后端契约校验：字段错误返回可读信息"}
+{"type":"before","callId":"call@5","startTime":60724.004,"class":"APIRequestContext","method":"fetch","params":{"url":"http://127.0.0.1:8765/analyze","method":"POST","jsonData":"{\"wrong_field\":\"x\"}"},"stepId":"pw:api@27"}
+{"type":"log","callId":"call@5","time":60728.681,"message":"→ POST http://127.0.0.1:8765/analyze"}
+{"type":"log","callId":"call@5","time":60728.719,"message":"  user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.34 Safari/537.36"}
+{"type":"log","callId":"call@5","time":60728.731,"message":"  accept: */*"}
+{"type":"log","callId":"call@5","time":60728.738,"message":"  accept-encoding: gzip,deflate,br"}
+{"type":"log","callId":"call@5","time":60728.812,"message":"  content-type: application/json"}
+{"type":"log","callId":"call@5","time":60728.827,"message":"  content-length: 19"}
+{"type":"log","callId":"call@5","time":60794.649,"message":"← 422 Unprocessable Content"}
+{"type":"log","callId":"call@5","time":60794.683,"message":"  date: Sun, 09 Aug 2026 16:04:17 GMT"}
+{"type":"log","callId":"call@5","time":60794.7,"message":"  server: uvicorn"}
+{"type":"log","callId":"call@5","time":60794.712,"message":"  content-length: 201"}
+{"type":"log","callId":"call@5","time":60794.721,"message":"  content-type: application/json"}
+{"type":"after","callId":"call@5","endTime":60796.723,"result":{"response":{"url":"http://127.0.0.1:8765/analyze","status":422,"statusText":"Unprocessable Content","headers":[{"name":"date","value":"Sun, 09 Aug 2026 16:04:17 GMT"},{"name":"server","value":"uvicorn"},{"name":"content-length","value":"201"},{"name":"content-type","value":"application/json"}],"timing":{"startTime":1786291458108,"domainLookupStart":-1,"domainLookupEnd":-1,"connectStart":0,"secureConnectionStart":-1,"connectEnd":5.131000000001222,"requestStart":5.131000000001222,"responseStart":68.03900000000431},"responseEndTiming":69.34900000000198,"fetchUid":"99aeafb046daca4ba25d6e8fce623e81"}}}
