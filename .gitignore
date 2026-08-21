@@ -97,3 +97,6 @@ skills/.index.json
 *.md
 !README.md
 !docs/*.md
+
+# 旧版前端备份
+frontend-react-backup/
