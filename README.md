@@ -27,6 +27,31 @@ CodeMason 是 Claude Code / Cline 同级的自主编码 Agent：理解需求 →
 - **事件驱动根因分析（G20）**：验证失败的下一跳不是"再试一次"而是"先溯源"——失败/疑问触发（非全库扫描，结构性防误报）→ 确定性证据链（图谱调用链 BFS + 事件流失败链回溯 + FixPacket 机读契约 + YAGNI 静态分析外环）→ LLM 归因假设（fresh-context + Doubt-driven 证伪，`agent_inferred` 永不自动升级）→ 溯源报告（search/read/edit 三阶段定位 + 证据集 + 修复指令）→ 诊断回喂（报告注入下一轮修复，CodeTracer 反思回放）→ 沉淀（`RootCauseReport` 事件进事件流可审计）；`codegraph_query` 工具 + PageRank 影响面排序；YAGNI 高频问题归因报告（代码评审场景）
 - **TRAJEVAL 三阶段评测**：任务级 pass@1 之外的工具级指标——轨迹分解 search/read/edit 逐段 precision/recall（对比 gold patch），输出工具调用正确率 / 调用链可靠性 / 失败阶段分布独立指标；30 自建任务集（有 gold patch + 三阶段标注，客观断言零 LLM 判定，可复现）
 - **对话投影视图（产品形态定稿）**：数据层在前——Op/Event 事件流是唯一真相，UI 是它的同源投影；驾驶舱中区双投影切换（对话视图=折叠投影 minimal：对话气泡 + 工具调用折叠卡 rich / 时间线=展开投影 rich），同一事件流两种渲染，切换不丢上下文、审批可原地展开、贡献报告可追溯；**Op rationale 字段**——每个工具调用携带模型一句话理由（≤20 词），事件标注 `rationale_source=model_self_report`（模型自述理由，非验证事实），"可解释性"三层兑现：show=事件流 / explain=rationale / justify=分类器+贡献报告
+- **自进化引擎（v1.31，用得越久越强）**：统一闭环（Observe→Analyze→Improve→Verify→Persist）+ 五个作用目标（Memory/Skill/Planning/Tool Usage/Harness，同一闭环的不同作用目标，非五个独立模块）+ 策略层（EvolutionPolicy：速率限制+效果监控+回滚，防过度进化）+ 用户反馈闭环（FeedbackGeneralizer：一次纠正→泛化到同类场景）+ 多阶段验证（Generate→Evaluate→Refine，渐进发布 shadow→canary→全量）；进化事件是 EventLog 的新事件类型（8 种进化事件），完全对齐"一切皆事件"叙事；复用 G20 根因分析 + FixPacket + YAGNI Hook + 事件溯源；驾驶舱进化视图（五维度健康度 + 进化时间线 + 同类任务 token 消耗趋势曲线）
+
+## 核心特性
+
+- **自主 Agent Loop**：手写事件流状态机（非框架），四类终止条件 + 每步 Checkpoint 打点，可回滚到任意节点；Plan/Act 双模式隔离，Plan 阶段只读三保险（prompt 层 + 工具预设 + shell 黑名单）
+- **YAGNI 约束引擎（独立验证 Hook）**：生成完成后对 staging diff 做确定性静态分析——七级决策阶梯（真需要吗 → 库里有吗 → 标准库能吗 → 平台原生吗 → 现有依赖覆盖吗 → 能一行吗 → 写最少代码），硬规则机械化（L2-L6）+ 软规则语义判断（L1），输出四维量化报告：行数减少 / 依赖未新增 / 重复实现数 / 可读性守门
+- **Staging 审查沙盒**：所有 AI 变更先进入 staging diff，经 YAGNI / 安全 / 权限 Hook 验证通过后才落盘——Hook 拦截的改动从未落盘，零回滚成本，全流程可审计
+- **Op/Event 协议驱动多界面**：双向契约（Op=意图 / Event=事实），schema 版本化 + Op 幂等；JSONL append-only 事件存储 + flock 写锁，断线从事件 ID 游标增量补发；加界面不改内核
+- **视图时间旅行**：`view(event_id, policy)` 在任意历史时刻重建当时的窗口视图——压缩 A/B 对照不用重跑任务、故障精确复现、断点精确续接；"当前视图"只是时间函数的一个采样点，状态永不保存只推导
+- **自动安全分类器（人在环位置重构）**：Tier1/2/3 分级（只读 allowlist 不过分类器 / 目录内写自动放行 / shell·外网·子代理过分类器，90% 常规动作零延迟）；hard-deny 20+ 规则（destroy-exfiltrate / degrade-security / supply-chain 三组硬拦）；input 层注入探测 + 执行后二次探测；两阶段判决（stage1 单 token 激进过滤 + stage2 CoT 精判，误报 8.5%→0.4%）；**reasoning-blind**——分类器只见用户消息与原始工具调用，结构性抗注入；三级处置（block / safer-alternative / escalate 人工）；连续 3 次拦截自动回退人工审批（fail-closed，无法证明安全就弹窗）
+- **执行沙箱四档矩阵**：SandboxProvider 抽象四后端全实现——L3 Firecracker microVM 默认（独立内核+KVM，数据不出域）+ L1 加固容器（`--network=none --cap-drop=ALL --read-only`，开发降级）+ L2 gVisor runsc（中档）+ L4 E2B 云托管；网络出口白名单 + 凭据绝不进沙箱；换层只换 Provider 实现，轨迹协议恒定
+- **纵深防御安全层**：shell 黑名单硬锁 + ensemble 多分析器投票（静态 AST + LLM 判断）+ Prompt 注入防御 + 密钥脱敏；Web 默认只绑 127.0.0.1 + session token + 审批二次确认；安全四层分工——黑名单挡已知 → 分类器判未知 → 人工审拦截 → 审计追全部
+- **审批收件箱**：无人值守 loop 中分类器放行的照跑、被拦截/存疑的进收件箱等人工——人类只审拦截件，不审每个动作；审批即事件（`ClassifierVerdict` 100% 落盘，白盒可溯源）
+- **控制平面（策略即代码）**：PolicyEngine 工具执行前 deny / require_approval 判定（企业管理面先于运行时防御）+ RuntimeController 运行时干预 + LoopLibrary 预置模板；LoopScheduler 调度触发 → UserTurnStart 入队 + LoopBudget 每 Op 记账、超限熔断
+- **双模型按 Op 分派 + 熔断降级**：architect（规划强推理）/ editor（执行快吞吐）分工，OpRouter 按工具名分派 cheap/standard/expensive 三档（成本归因 + 合规审计，防软配置绕过）；Provider 抽象层不绑定单一厂商，同角色 fallback 链 + 指数退避重试
+- **代码图谱 AST 索引**：Tree-sitter 符号索引（Python/JS/Go），一次查询替代 N 次 grep + token 估算，供上下文召回与知识图谱
+- **三层记忆 + T1-T5 渐进压缩**：会话 JSONL / 项目规则 / 跨会话经验，同类任务第二次执行步骤数下降；上下文超窗自动压缩，Token 消耗降 40%
+- **Lazy Skills 渐进加载**：技能元数据分阶段加载（name → SKILL.md → references），未命中 Skill 零 token 开销
+- **Subagents + MCP**：独立上下文窗口 + 结论回流协议（findings schema ≤2K）；MCP 客户端 + 3 个示例 Server（GitHub / 数据库 / 云服务）
+- **Team Kernel 多人协作**：单写者协调（并行读者 context firewall）+ 事件触发（GitHub Issue/PR @agent + Slack/飞书 mention → 自动开任务）+ 三级权限矩阵（team/department/org × public/team/secret 敏感度，secret 白名单）+ AGENTS.md 渐进式披露（目录角色 + 32KiB 校验）
+- **AI 贡献报告（合规透明）**：`ContributionReport = f(EventLog, policy)` 纯投影零 LLM——files+line_range+changed_by+provenance / ai_involvement / verification / cost 四维明细；git_attribution_metadata 生成 `Co-Authored-By: CodeMason AI Agent` trailer（EU AI Act Article 50 透明披露）
+- **OTel 遥测导出**：事件流订阅 → OTLP 记录（prompt/审批决策/工具结果/沙箱轨迹），无端点优雅降级 + 快照 JSONL 导出，企业合规可对接
+- **事件驱动根因分析（G20）**：验证失败的下一跳不是"再试一次"而是"先溯源"——失败/疑问触发（非全库扫描，结构性防误报）→ 确定性证据链（图谱调用链 BFS + 事件流失败链回溯 + FixPacket 机读契约 + YAGNI 静态分析外环）→ LLM 归因假设（fresh-context + Doubt-driven 证伪，`agent_inferred` 永不自动升级）→ 溯源报告（search/read/edit 三阶段定位 + 证据集 + 修复指令）→ 诊断回喂（报告注入下一轮修复，CodeTracer 反思回放）→ 沉淀（`RootCauseReport` 事件进事件流可审计）；`codegraph_query` 工具 + PageRank 影响面排序；YAGNI 高频问题归因报告（代码评审场景）
+- **TRAJEVAL 三阶段评测**：任务级 pass@1 之外的工具级指标——轨迹分解 search/read/edit 逐段 precision/recall（对比 gold patch），输出工具调用正确率 / 调用链可靠性 / 失败阶段分布独立指标；30 自建任务集（有 gold patch + 三阶段标注，客观断言零 LLM 判定，可复现）
+- **对话投影视图（产品形态定稿）**：数据层在前——Op/Event 事件流是唯一真相，UI 是它的同源投影；驾驶舱中区双投影切换（对话视图=折叠投影 minimal：对话气泡 + 工具调用折叠卡 rich / 时间线=展开投影 rich），同一事件流两种渲染，切换不丢上下文、审批可原地展开、贡献报告可追溯；**Op rationale 字段**——每个工具调用携带模型一句话理由（≤20 词），事件标注 `rationale_source=model_self_report`（模型自述理由，非验证事实），"可解释性"三层兑现：show=事件流 / explain=rationale / justify=分类器+贡献报告
 
 ## 架构
 
